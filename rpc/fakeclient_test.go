@@ -25,7 +25,7 @@ func TestConcurrentOneClient(t *testing.T) {
 	rn.Enable("server0-server99", true)
 	rn.Connect("server0-server99", "server99")
 
-	cls := MakeClients(rn, "server0")
+	cls := MakeFakeClients(rn, "server0")
 	cl, _ := cls.MakeClient("server99")
 
 	ch := make(chan interface{})
@@ -96,7 +96,7 @@ func TestSameClientsMany(t *testing.T) {
 	rn.Enable("server0-server99", true)
 	rn.Connect("server0-server99", "server99")
 
-	cls := MakeClients(rn, "server0")
+	cls := MakeFakeClients(rn, "server0")
 
 	ch := make(chan interface{})
 

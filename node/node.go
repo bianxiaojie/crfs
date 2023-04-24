@@ -2,9 +2,12 @@ package node
 
 import (
 	izk "crfs/zk" // 封装了zookeeper连接和客户端的接口
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-zookeeper/zk"
 )
 
 const (
@@ -139,6 +142,19 @@ func (node *Node) watchChain() {
 		}
 
 		// 2.如果name == "",建立临时文件,存储自己的address
+		node.mu.Lock()
+		name := node.name
+		node.mu.Unlock()
+		if name == "" {
+			n, err := zkConn.Create(node.chainPath+"/"+node.prefix, []byte(node.address), zk.FlagEphemeral|zk.FlagSequence)
+			if err != nil {
+				continue
+			}
+			node.mu.Lock()
+			node.name = n
+			name = node.name
+			node.mu.Unlock()
+		}
 
 		// 读数据之前先进行同步
 		if _, err := zkConn.Sync(node.chainPath); err != nil {
@@ -146,12 +162,68 @@ func (node *Node) watchChain() {
 		}
 
 		// 3.读取node.chainPath文件夹,通过分析自己在链表中的位置,获取前驱节点,后继节点和尾节点
+		// 读取文件夹
+		chain, _, eventCh, err := zkConn.Children(node.chainPath, true)
+		if err != nil {
+			continue
+		}
+
+		// 获取邻居节点
+		sort.Strings(chain)
+		var prev, next, tail string
+		i := 0
+		for ; i < len(chain); i++ {
+			if name == chain[i] {
+				break
+			}
+		}
+		if i == len(chain) {
+			go func() { <-eventCh }()
+			continue
+		}
+		if i > 0 {
+			prev = chain[i-1]
+
+		}
+		if i < len(chain)-1 {
+			next = chain[i+1]
+		}
+		tail = chain[len(chain)-1]
 
 		// 4.分别读取前驱节点,后继节点和尾节点的address
+		var prevAddress, nextAddress, tailAddress string
+		if prev != "" {
+			data, _, _, err := zkConn.Get(node.chainPath+"/"+prev, false)
+			if err != nil {
+				go func() { <-eventCh }()
+				continue
+			}
+			prevAddress = string(data)
+		}
+		if next != "" {
+			data, _, _, err := zkConn.Get(node.chainPath+"/"+next, false)
+			if err != nil {
+				go func() { <-eventCh }()
+				continue
+			}
+			nextAddress = string(data)
+		}
+		data, _, _, err := zkConn.Get(node.chainPath+"/"+tail, false)
+		if err != nil {
+			go func() { <-eventCh }()
+			continue
+		}
+		tailAddress = string(data)
 
 		// 5.更新node.neighbours
+		node.mu.Lock()
+		node.neighbours[PosPrev] = Neighbour{name: prev, address: prevAddress}
+		node.neighbours[PosNext] = Neighbour{name: next, address: nextAddress}
+		node.neighbours[PosTail] = Neighbour{name: tail, address: tailAddress}
+		node.mu.Unlock()
 
 		// 6.等待node.chainPath文件夹的变化
+		<-eventCh
 	}
 }
 

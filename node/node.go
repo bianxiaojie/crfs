@@ -1,9 +1,11 @@
 package node
 
 import (
+	"bytes"
 	"crfs/persister"
 	"crfs/rpc"
 	izk "crfs/zk" // 封装了zookeeper连接和客户端的接口
+	"encoding/gob"
 	"log"
 	"sort"
 	"strconv"
@@ -113,16 +115,13 @@ func MakeNode(zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix s
 }
 
 func (node *Node) persist() {
-	// 持久化的例子
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(node.field)
-	// data := w.Bytes()
-	// node.persister.SaveNodeState(data)
-
-	// 将node.CommitIndex和node.Logs持久化
-	// 注意只持久化提交的日志
-
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(node.CommitIndex)
+	// 只持久化提交的日志
+	e.Encode(node.Logs[:node.CommitIndex+1])
+	data := w.Bytes()
+	node.persister.SaveNodeState(data)
 }
 
 func (node *Node) readPersist(data []byte) {
@@ -130,18 +129,18 @@ func (node *Node) readPersist(data []byte) {
 		return
 	}
 
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	//
-	// var field type
-	// if d.Decode(&field) != nil {
-	// 	log.Fatalln("decode error")
-	// }
-	//
-	// node.field = field
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	var commitIndex int
+	var logs []Log
 
-	// 读取node.CommitIndex和node.Logs
+	if d.Decode(&commitIndex) != nil ||
+		d.Decode(&logs) != nil {
+		log.Fatalln("decode error")
+	}
 
+	node.CommitIndex = commitIndex
+	node.Logs = logs
 }
 
 // 监控链表,每当链表发生变化时,重新从zookeeper获取最新的链表信息
@@ -511,6 +510,7 @@ func (node *Node) kickOffCommit() {
 		node.mu.Lock()
 		if commitIndex > node.CommitIndex {
 			node.CommitIndex = commitIndex
+			node.persist()
 		}
 		node.mu.Unlock()
 	}
@@ -602,6 +602,7 @@ func (node *Node) Ack(args *AckArgs, reply *AckReply) {
 	// 更新CommitIndex
 	if node.CommitIndex < args.CommitIndex && args.CommitIndex < len(node.Logs) {
 		node.CommitIndex = args.CommitIndex
+		node.persist()
 	}
 
 	reply.CommitIndex = node.CommitIndex

@@ -35,7 +35,7 @@ func MakeFakeClients(rn *Network, servername string) *FakeClients {
 	return fcs
 }
 
-func (fcs *FakeClients) MakeClient(serverAddr string) (*FakeClient, error) {
+func (fcs *FakeClients) MakeClient(serverAddr string) (Client, error) {
 	endname := fmt.Sprintf("%s-%s", fcs.me, serverAddr)
 	end, ok := fcs.net.GetEnd(endname)
 	if !ok {

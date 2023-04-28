@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -154,12 +155,14 @@ type config struct {
 	servers  []*server
 	zkServer *FakeZKServer
 
-	t0     time.Time // time at which test_test.go called cfg.begin()
-	rpcs0  int       // rpcTotal() at start of test
+	t0     time.Time // 测试代码调用cfg.begin()的时间点
+	rpcs0  int       // 测试开始时rpcTotal()的值
 	bytes0 int64
 }
 
 func makeConfig(n int) *config {
+	runtime.GOMAXPROCS(4)
+
 	cfg := &config{}
 
 	net := rpc.MakeNetwork()
@@ -210,9 +213,9 @@ func (cfg *config) begin(description string) {
 }
 
 func (cfg *config) end() {
-	t := time.Since(cfg.t0).Seconds()              // real time
-	nrpc := cfg.net.GetTotalCount() - cfg.rpcs0    // number of RPC sends
-	nbytes := cfg.net.GetTotalBytes() - cfg.bytes0 // number of bytes
+	t := time.Since(cfg.t0).Seconds()              // 运行时间
+	nrpc := cfg.net.GetTotalCount() - cfg.rpcs0    // rpc总数
+	nbytes := cfg.net.GetTotalBytes() - cfg.bytes0 // rpc发送的字节总数
 
 	fmt.Printf("  ... Passed --")
 	fmt.Printf("  %4.1f  %4d %7d\n", t, nrpc, nbytes)

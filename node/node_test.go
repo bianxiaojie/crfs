@@ -394,3 +394,128 @@ func TestAgreementConcurrentUnrealiable(t *testing.T) {
 
 	cfg.end()
 }
+
+func TestPersistenceBasic(t *testing.T) {
+	nnodes := 3
+	cfg := makeConfig(nnodes, t)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (Persistence): test basic persistence")
+	time.Sleep(sessionTimeout)
+
+	chain := cfg.checkChain(0, 1, 2)
+	header1, node11, node12 := chain[0], chain[1], chain[2]
+
+	cmd := 0
+	iters := 10
+	for i := 0; i < iters; i++ {
+		cfg.one(cmd, header1, false, header1, node11, node12)
+		cmd++
+	}
+
+	cfg.crashOne(0)
+	cfg.crashOne(1)
+	cfg.crashOne(2)
+
+	time.Sleep(2 * sessionTimeout)
+
+	cfg.startOne(0)
+	cfg.startOne(1)
+	cfg.startOne(2)
+
+	time.Sleep(sessionTimeout)
+
+	if nCommitted, _ := cfg.nCommitted(cmd-1, 0, 1, 2); nCommitted != 3 {
+		cfg.t.Fatalf("节点重启后应当保留提交的日志,但%d个节点中只有%d个节点保留所有提交的日志\n", 3, nCommitted)
+	}
+
+	cfg.end()
+}
+
+func TestPersistenceMore(t *testing.T) {
+	nnodes := 5
+	cfg := makeConfig(nnodes, t)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (Persistence): test more persistence")
+
+	cmd := 0
+	iters := 3
+	for i := 0; i < iters; i++ {
+		time.Sleep(sessionTimeout)
+
+		chain := cfg.checkChain(0, 1, 2, 3, 4)
+		header1, node11, node12, node13, node14 := chain[0], chain[1], chain[2], chain[3], chain[4]
+		cfg.one(cmd, header1, false, header1, node11, node12, node13, node14)
+		cmd++
+
+		cfg.crashOne(node11)
+		time.Sleep(2 * sessionTimeout)
+
+		chain = cfg.checkChain(header1, node12, node13, node14)
+		header2, node21, node22, node23 := chain[0], chain[1], chain[2], chain[3]
+		cfg.one(cmd, header2, false, header2, node21, node22, node23)
+		cmd++
+
+		cfg.crashOne(header2)
+		cfg.startOne(node11)
+		time.Sleep(2 * sessionTimeout)
+
+		chain = cfg.checkChain(node11, node21, node22, node23)
+		header3, node31, node32, node33 := chain[0], chain[1], chain[2], chain[3]
+		cfg.one(cmd, header3, false, header3, node31, node32, node33)
+		cmd++
+
+		cfg.startOne(header2)
+	}
+
+	cfg.end()
+}
+func TestPersistenceUnreliable(t *testing.T) {
+	nnodes := 3
+	cfg := makeConfig(nnodes, t)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (Persistence): test persistence (unreliable)")
+	time.Sleep(sessionTimeout)
+
+	chain := cfg.checkChain(0, 1, 2)
+	header1, node11, node12 := chain[0], chain[1], chain[2]
+
+	cfg.net.Reliable(false)
+
+	cmd := 0
+	iters := 10
+	for i := 0; i < iters; i++ {
+		cfg.one(cmd, header1, false, header1, node11, node12)
+		cmd++
+	}
+
+	cfg.crashOne(0)
+	cfg.crashOne(1)
+	cfg.crashOne(2)
+
+	cfg.net.Reliable(true)
+	time.Sleep(2 * sessionTimeout)
+
+	cfg.startOne(0)
+	cfg.startOne(1)
+	cfg.startOne(2)
+
+	time.Sleep(sessionTimeout)
+
+	chain = cfg.checkChain(0, 1, 2)
+	header2, node21, node22 := chain[0], chain[1], chain[2]
+	cfg.net.Reliable(false)
+
+	for i := 0; i < iters; i++ {
+		cfg.one(cmd, header2, false, header2, node21, node22)
+		cmd++
+	}
+
+	if nCommitted, _ := cfg.nCommitted(cmd-1, 0, 1, 2); nCommitted != 3 {
+		cfg.t.Fatalf("节点重启后应当保留提交的日志,但%d个节点中只有%d个节点保留所有提交的日志\n", 3, nCommitted)
+	}
+
+	cfg.end()
+}

@@ -100,7 +100,9 @@ func MakeNode(zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix s
 
 	node.Logs = make([]Log, 0)
 	node.CommitIndex = -1
-	node.lastApplied = node.CommitIndex
+	node.lastApplied = -1
+
+	node.readPersist(persister.ReadNodeState())
 
 	go node.watchChain()
 	go node.kickOffCopy()
@@ -108,6 +110,38 @@ func MakeNode(zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix s
 	go node.kickOffApply()
 
 	return node
+}
+
+func (node *Node) persist() {
+	// 持久化的例子
+	// w := new(bytes.Buffer)
+	// e := gob.NewEncoder(w)
+	// e.Encode(node.field)
+	// data := w.Bytes()
+	// node.persister.SaveNodeState(data)
+
+	// 将node.CommitIndex和node.Logs持久化
+	// 注意只持久化提交的日志
+
+}
+
+func (node *Node) readPersist(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	// r := bytes.NewBuffer(data)
+	// d := gob.NewDecoder(r)
+	//
+	// var field type
+	// if d.Decode(&field) != nil {
+	// 	log.Fatalln("decode error")
+	// }
+	//
+	// node.field = field
+
+	// 读取node.CommitIndex和node.Logs
+
 }
 
 // 监控链表,每当链表发生变化时,重新从zookeeper获取最新的链表信息

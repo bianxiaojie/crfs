@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-zookeeper/zk"
 )
 
 const (
@@ -38,16 +40,15 @@ func IPToString(ip [4]byte) string {
 }
 
 type config struct {
-	mu            sync.Mutex
-	t             *testing.T
-	net           *rpc.Network
-	zkServer      *izk.FakeZKServer
-	clientAddress string
-	addresses     []string
-	connected     []bool // 是否与zookeeper正在连接
-	logs          []map[int]interface{}
-	nodes         []*Node
-	saved         []persister.Persister
+	mu        sync.Mutex
+	t         *testing.T
+	net       *rpc.Network
+	zkServer  *izk.FakeZKServer
+	addresses []string
+	connected []bool // 是否与zookeeper正在连接
+	logs      []map[int]interface{}
+	nodes     []*Node
+	saved     []persister.Persister
 
 	t0        time.Time // 测试代码调用cfg.begin()的时间点
 	rpcs0     int       // 测试开始时rpcTotal()的值
@@ -56,7 +57,7 @@ type config struct {
 	maxIndex0 int
 }
 
-func makeConfig(n int, t *testing.T) *config {
+func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	runtime.GOMAXPROCS(4)
 
 	cfg := &config{}
@@ -75,11 +76,11 @@ func makeConfig(n int, t *testing.T) *config {
 	srv.AddService(svc)
 	net.AddServer(zoo, srv)
 
-	cfg.clientAddress = "config"
-	cfg.net.MakeEnd(cfg.clientAddress + "-" + zoo)
-	cfg.net.Connect(cfg.clientAddress+"-"+zoo, zoo)
-	cfg.net.Enable(cfg.clientAddress+"-"+zoo, true)
-	conn, err := makeZKConn(net, cfg.clientAddress)
+	clientAddress := "config"
+	cfg.net.MakeEnd(clientAddress + "-" + zoo)
+	cfg.net.Connect(clientAddress+"-"+zoo, zoo)
+	cfg.net.Enable(clientAddress+"-"+zoo, true)
+	conn, err := makeZKConn(net, clientAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +120,8 @@ func makeConfig(n int, t *testing.T) *config {
 	for i := 0; i < n; i++ {
 		cfg.startOne(i)
 	}
+
+	cfg.net.Reliable(!unreliable)
 
 	return cfg
 }
@@ -229,17 +232,23 @@ func makeZKConn(net *rpc.Network, address string) (izk.ZKConn, error) {
 	}
 
 	fzkc := izk.MakeFakeZKClient(client, []string{zoo}, sessionTimeout)
-	conn, err := fzkc.Connect()
-	if err != nil {
-		return nil, err
+
+	start := time.Now()
+	for time.Since(start) <= sessionTimeout {
+		if conn, err := fzkc.Connect(); err == nil {
+			return conn, nil
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return conn, nil
+
+	return nil, zk.ErrNoServer
 }
 
 type nodeInfo struct {
-	index      int
-	name       string
-	neighbours [3]string
+	index int
+	name  string
+	prev  string
+	next  string
 }
 
 func (cfg *config) checkChain(servers ...int) []int {
@@ -255,11 +264,12 @@ func (cfg *config) checkChain(servers ...int) []int {
 		if !re.MatchString(name) {
 			cfg.t.Fatalf("节点名格式错误,应当是数字字符串,但实际的值为: %s\n", name)
 		}
-		neighbours := node.GetNeighbours()
+		prev, next := node.GetNeighbours()
 		nis[i] = nodeInfo{
-			index:      nodeIndex,
-			name:       name,
-			neighbours: neighbours,
+			index: nodeIndex,
+			name:  name,
+			prev:  prev,
+			next:  next,
 		}
 	}
 
@@ -278,23 +288,18 @@ func (cfg *config) checkChain(servers ...int) []int {
 	}
 
 	for i, ni := range nis {
-		neighbours := ni.neighbours
-		var prev, next, tail string
+		var prev, next string
 		if i > 0 {
 			prev = nis[i-1].name
 		}
-		if prev != neighbours[0] {
-			cfg.t.Fatalf("链表为: %v, 节点%s的前驱节点应该为: %s, 但实际存储的前驱节点为: %s\n", chain, ni.name, prev, neighbours[0])
+		if prev != ni.prev {
+			cfg.t.Fatalf("链表为: %v, 节点%s的前驱节点应该为: %s, 但实际存储的前驱节点为: %s\n", chain, ni.name, prev, ni.prev)
 		}
 		if i < len(nis)-1 {
 			next = nis[i+1].name
 		}
-		if next != neighbours[1] {
-			cfg.t.Fatalf("链表为: %v, 节点%s的后继节点应该为: %s, 但实际存储的后继节点为: %s\n", chain, ni.name, next, neighbours[1])
-		}
-		tail = nis[len(nis)-1].name
-		if tail != neighbours[2] {
-			cfg.t.Fatalf("链表为: %v, 尾节点应该为: %s, 但实际存储的尾节点为: %s\n", chain, tail, neighbours[2])
+		if next != ni.next {
+			cfg.t.Fatalf("链表为: %v, 节点%s的后继节点应该为: %s, 但实际存储的后继节点为: %s\n", chain, ni.name, next, ni.next)
 		}
 	}
 
@@ -303,7 +308,7 @@ func (cfg *config) checkChain(servers ...int) []int {
 
 func (cfg *config) checkCrash(servers ...int) {
 	for _, nodeIndex := range servers {
-		if cfg.nodes[nodeIndex] != nil && !cfg.nodes[nodeIndex].killed() {
+		if cfg.nodes[nodeIndex] != nil && !cfg.nodes[nodeIndex].Killed() {
 			cfg.t.Fatalf("节点%s应当已经被Killed, 但节点还是存活\n", cfg.nodes[nodeIndex].address)
 		}
 	}

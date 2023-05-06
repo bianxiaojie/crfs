@@ -348,6 +348,8 @@ func (fzkc *FakeZKConn) Sync(path string) (string, error) {
 }
 
 func (fzkc *FakeZKConn) kickOffHeartBeat() {
+	triggerAck := false
+
 	for {
 		fzkc.mu.Lock()
 		if time.Since(fzkc.t) >= fzkc.sessionTimeout {
@@ -365,10 +367,13 @@ func (fzkc *FakeZKConn) kickOffHeartBeat() {
 			break
 		}
 		args := SendHeartBeatArgs{
-			ConnName: fzkc.name,
+			ConnName:   fzkc.name,
+			TriggerAck: triggerAck,
 		}
 		var reply SendHeartBeatReply
 		fzkc.mu.Unlock()
+
+		triggerAck = false
 
 		if fzkc.client.Call("FakeZKServer.SendHeartBeat", &args, &reply) {
 			fzkc.mu.Lock()
@@ -392,6 +397,8 @@ func (fzkc *FakeZKConn) kickOffHeartBeat() {
 						delete(fzkc.watchers, watcherName)
 					}
 				}
+
+				triggerAck = true
 			}
 
 			fzkc.mu.Unlock()
@@ -765,12 +772,13 @@ type conn struct {
 }
 
 type FakeZKServer struct {
-	mu          sync.Mutex
-	ws          *watcherStore
-	root        *znode
-	conns       map[string]*conn
-	connsZNodes map[string][]string // 每个连接创建的临时节点的列表,连接断开时移除
-	dead        int32
+	mu                sync.Mutex
+	ws                *watcherStore
+	root              *znode
+	conns             map[string]*conn
+	connsZNodes       map[string][]string // 每个连接创建的临时节点的列表,连接断开时移除
+	triggeredWatchers map[string][]string
+	dead              int32
 }
 
 func MakeFakeZKServer() *FakeZKServer {
@@ -780,6 +788,7 @@ func MakeFakeZKServer() *FakeZKServer {
 	fzks.root = makeZNode("", "", nil, 0, ws)
 	fzks.conns = make(map[string]*conn)
 	fzks.connsZNodes = make(map[string][]string)
+	fzks.triggeredWatchers = make(map[string][]string)
 
 	go fzks.kickOffCleanup()
 
@@ -832,6 +841,7 @@ func (fzks *FakeZKServer) close(connName string) ([]string, bool) {
 	znodes := fzks.connsZNodes[connName]
 	delete(fzks.connsZNodes, connName)
 	fzks.ws.removeConn(connName)
+	delete(fzks.triggeredWatchers, connName)
 
 	return znodes, true
 }
@@ -1138,7 +1148,8 @@ func (fzks *FakeZKServer) Sync(args *SyncArgs, reply *SyncReply) {
 }
 
 type SendHeartBeatArgs struct {
-	ConnName string
+	ConnName   string
+	TriggerAck bool
 }
 
 type SendHeartBeatReply struct {
@@ -1152,7 +1163,20 @@ func (fzks *FakeZKServer) SendHeartBeat(args *SendHeartBeatArgs, reply *SendHear
 		return
 	}
 
-	reply.WatcherNames = fzks.ws.getTriggered(args.ConnName)
+	fzks.mu.Lock()
+	defer fzks.mu.Unlock()
+
+	if args.TriggerAck {
+		delete(fzks.triggeredWatchers, args.ConnName)
+	}
+
+	watcherNames, ok := fzks.triggeredWatchers[args.ConnName]
+	if !ok {
+		fzks.triggeredWatchers[args.ConnName] = fzks.ws.getTriggered(args.ConnName)
+		watcherNames = fzks.triggeredWatchers[args.ConnName]
+	}
+
+	reply.WatcherNames = watcherNames
 	reply.Err = success
 }
 

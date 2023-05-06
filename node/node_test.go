@@ -7,7 +7,7 @@ import (
 
 func TestChainBasic(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Chain): basic chain test")
@@ -20,7 +20,7 @@ func TestChainBasic(t *testing.T) {
 
 func TestChainVaried(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Chain): varied chain test")
@@ -46,7 +46,7 @@ func TestChainVaried(t *testing.T) {
 
 func TestChainVariedMore(t *testing.T) {
 	nnodes := 5
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Chain): test chain varied more")
@@ -78,7 +78,7 @@ func TestChainVariedMore(t *testing.T) {
 
 func TestAgreementBasic(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): basic agreement test")
@@ -107,7 +107,7 @@ func TestAgreementBasic(t *testing.T) {
 
 func TestAgreementConcurrent(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): concurrent agreement test")
@@ -141,7 +141,7 @@ func TestAgreementConcurrent(t *testing.T) {
 
 func TestAgreementCrashRestart(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): agreement test with crash and restart")
@@ -183,7 +183,7 @@ func TestAgreementCrashRestart(t *testing.T) {
 	}
 
 	cfg.startOne(header1)
-	time.Sleep(2 * sessionTimeout)
+	time.Sleep(sessionTimeout)
 
 	chain = cfg.checkChain(header2, node21, header1)
 	if header2 != chain[0] {
@@ -200,7 +200,7 @@ func TestAgreementCrashRestart(t *testing.T) {
 
 func TestAgreementDisconnect(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): agreement test with disconnect")
@@ -222,7 +222,7 @@ func TestAgreementDisconnect(t *testing.T) {
 	}
 
 	cfg.enable(node1, node2, true)
-	time.Sleep(2 * sessionTimeout)
+	time.Sleep(sessionTimeout)
 
 	if nCommitted, _ := cfg.nCommitted(cmd-1, header, node1, node2); nCommitted != 3 {
 		cfg.t.Fatalf("节点%s和尾节点%s网络恢复,所有节点应当提交所有日志,但只有%d个节点提交了所有日志\n", cfg.addresses[node1], cfg.addresses[node2], nCommitted)
@@ -238,7 +238,7 @@ func TestAgreementDisconnect(t *testing.T) {
 
 func TestAgreementCommittedNodeCrashed(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): agreement test where committed node crashed")
@@ -269,7 +269,7 @@ func TestAgreementCommittedNodeCrashed(t *testing.T) {
 
 func TestAgreementHeaderParitition(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): agreement test with header partition")
@@ -280,7 +280,7 @@ func TestAgreementHeaderParitition(t *testing.T) {
 	header1, node11, node12 := chain[0], chain[1], chain[2]
 
 	cfg.enableZookeeper(header1, false)
-	conn, err := makeZKConn(cfg.net, cfg.clientAddress)
+	conn, err := makeZKConn(cfg.net, "config")
 	if err != nil {
 		cfg.t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestAgreementHeaderParitition(t *testing.T) {
 		cfg.t.Fatal(err)
 	}
 
-	time.Sleep(sessionTimeout / 2)
+	time.Sleep(sessionTimeout)
 
 	chain = cfg.checkChain(node11, node12)
 	header2, node21 := chain[0], chain[1]
@@ -314,7 +314,7 @@ func TestAgreementHeaderParitition(t *testing.T) {
 
 func TestAgreementTailParitition(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): agreement test with tail partition")
@@ -326,7 +326,7 @@ func TestAgreementTailParitition(t *testing.T) {
 	_ = cfg.checkChain(0)
 
 	cfg.enableZookeeper(0, false)
-	if conn, err := makeZKConn(cfg.net, cfg.clientAddress); err != nil {
+	if conn, err := makeZKConn(cfg.net, "config"); err != nil {
 		cfg.t.Fatal(err)
 	} else if err = conn.Delete(cfg.nodes[0].chainPath+"/"+cfg.nodes[0].name, 0); err != nil {
 		cfg.t.Fatal(err)
@@ -335,7 +335,7 @@ func TestAgreementTailParitition(t *testing.T) {
 	cfg.startOne(1)
 	cfg.startOne(2)
 
-	time.Sleep(sessionTimeout / 2)
+	time.Sleep(sessionTimeout)
 
 	_ = cfg.checkChain(0)
 	chain := cfg.checkChain(1, 2)
@@ -361,7 +361,7 @@ func TestAgreementTailParitition(t *testing.T) {
 
 func TestAgreementConcurrentUnrealiable(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, true)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Agreement): concurrent agreement test (unrealiable)")
@@ -369,8 +369,6 @@ func TestAgreementConcurrentUnrealiable(t *testing.T) {
 
 	chain := cfg.checkChain(0, 1, 2)
 	header, node1, node2 := chain[0], chain[1], chain[2]
-
-	cfg.net.Reliable(false)
 
 	cmd := 0
 	iters := 160
@@ -397,7 +395,7 @@ func TestAgreementConcurrentUnrealiable(t *testing.T) {
 
 func TestPersistenceBasic(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Persistence): test basic persistence")
@@ -417,7 +415,7 @@ func TestPersistenceBasic(t *testing.T) {
 	cfg.crashOne(1)
 	cfg.crashOne(2)
 
-	time.Sleep(2 * sessionTimeout)
+	time.Sleep(sessionTimeout)
 
 	cfg.startOne(0)
 	cfg.startOne(1)
@@ -434,7 +432,7 @@ func TestPersistenceBasic(t *testing.T) {
 
 func TestPersistenceMore(t *testing.T) {
 	nnodes := 5
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, false)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Persistence): test more persistence")
@@ -473,7 +471,7 @@ func TestPersistenceMore(t *testing.T) {
 }
 func TestPersistenceUnreliable(t *testing.T) {
 	nnodes := 3
-	cfg := makeConfig(nnodes, t)
+	cfg := makeConfig(t, nnodes, true)
 	defer cfg.cleanup()
 
 	cfg.begin("Test (Persistence): test persistence (unreliable)")
@@ -481,8 +479,6 @@ func TestPersistenceUnreliable(t *testing.T) {
 
 	chain := cfg.checkChain(0, 1, 2)
 	header1, node11, node12 := chain[0], chain[1], chain[2]
-
-	cfg.net.Reliable(false)
 
 	cmd := 0
 	iters := 10
@@ -495,7 +491,6 @@ func TestPersistenceUnreliable(t *testing.T) {
 	cfg.crashOne(1)
 	cfg.crashOne(2)
 
-	cfg.net.Reliable(true)
 	time.Sleep(2 * sessionTimeout)
 
 	cfg.startOne(0)
@@ -506,7 +501,6 @@ func TestPersistenceUnreliable(t *testing.T) {
 
 	chain = cfg.checkChain(0, 1, 2)
 	header2, node21, node22 := chain[0], chain[1], chain[2]
-	cfg.net.Reliable(false)
 
 	for i := 0; i < iters; i++ {
 		cfg.one(cmd, header2, false, header2, node21, node22)

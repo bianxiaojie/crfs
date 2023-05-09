@@ -452,12 +452,14 @@ type watcherStore struct {
 	mu                  sync.Mutex
 	untriggeredWatchers map[string][]watcher // 未触发的watcher,key是路径
 	triggeredWatchers   map[string][]string  // 触发的watcher,key是conn的name
+	ephemeralZNodes     map[string][]string  // 临时节点的列表,key是conn的name,确保原子性
 }
 
 func makeWatcherStore() *watcherStore {
 	watcherStore := &watcherStore{}
 	watcherStore.untriggeredWatchers = make(map[string][]watcher)
 	watcherStore.triggeredWatchers = make(map[string][]string)
+	watcherStore.ephemeralZNodes = make(map[string][]string)
 	return watcherStore
 }
 
@@ -466,13 +468,18 @@ func (ws *watcherStore) addConn(connName string) {
 	defer ws.mu.Unlock()
 
 	ws.triggeredWatchers[connName] = make([]string, 0)
+	ws.ephemeralZNodes[connName] = make([]string, 0)
 }
 
-func (ws *watcherStore) removeConn(connName string) {
+func (ws *watcherStore) removeConn(connName string) []string {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
 
 	delete(ws.triggeredWatchers, connName)
+	ephemeralZNodes := ws.ephemeralZNodes[connName]
+	delete(ws.ephemeralZNodes, connName)
+
+	return ephemeralZNodes
 }
 
 func (ws *watcherStore) addUntriggered(watcher watcher) {
@@ -508,6 +515,29 @@ func (ws *watcherStore) getTriggered(connName string) []string {
 	}
 
 	return triggeredWatchers
+}
+
+func (ws *watcherStore) addEphemeralZNodes(connName string, path string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if _, ok := ws.ephemeralZNodes[connName]; ok {
+		ws.ephemeralZNodes[connName] = append(ws.ephemeralZNodes[connName], path)
+	}
+}
+
+func (ws *watcherStore) removeEphemeralZNodes(connName string, path string) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	if ephemeralZNodes, ok := ws.ephemeralZNodes[connName]; ok {
+		for i := range ephemeralZNodes {
+			if ephemeralZNodes[i] == path {
+				ws.ephemeralZNodes[connName] = append(ephemeralZNodes[:i], ephemeralZNodes[i+1:]...)
+				break
+			}
+		}
+	}
 }
 
 type znode struct {
@@ -560,7 +590,7 @@ func (zn *znode) Create(connName string, parents []string, paths []string, data 
 	name := paths[0]
 	if flags&zk.FlagSequence == zk.FlagSequence {
 		zn.counters[name]++
-		name = fmt.Sprintf("%s%d", name, zn.counters[name])
+		name = fmt.Sprintf("%s%010d", name, zn.counters[name])
 	}
 	if _, ok := zn.children[name]; ok {
 		return "", nodeExists
@@ -570,7 +600,12 @@ func (zn *znode) Create(connName string, parents []string, paths []string, data 
 	zn.children[name] = child
 	zn.version++
 
-	zn.ws.trigger("/" + strings.Join(parents, "/"))
+	directory := "/" + strings.Join(parents, "/")
+	file := directory + "/" + name
+	if flags&zk.FlagEphemeral == zk.FlagEphemeral {
+		zn.ws.addEphemeralZNodes(connName, file)
+	}
+	zn.ws.trigger(directory, file)
 
 	return name, success
 }
@@ -613,46 +648,81 @@ func (zn *znode) Delete(parents []string, paths []string, version int32) err {
 
 	directory := "/" + strings.Join(parents, "/")
 	file := directory + "/" + name
+	if child.flags&zk.FlagEphemeral == zk.FlagEphemeral {
+		zn.ws.removeEphemeralZNodes(child.connName, file)
+	}
 	zn.ws.trigger(directory, file)
 
 	return success
 }
 
-func (zn *znode) Exists(paths []string) (bool, int32) {
+func (zn *znode) Exists(parents []string, paths []string, watch bool, connName string) (bool, int32, string) {
 	if len(paths) > 0 {
 		zn.mu.RLock()
 		defer zn.mu.RUnlock()
 
 		child, ok := zn.children[paths[0]]
 		if !ok {
-			return false, 0
+			watcherName := ""
+			if watch {
+				watcherName = randstring(16)
+				watcher := watcher{
+					name:     watcherName,
+					path:     "/" + strings.Join(append(parents, paths...), "/"),
+					connName: connName,
+				}
+				zn.ws.addUntriggered(watcher)
+			}
+			return false, 0, watcherName
 		}
-		return child.Exists(paths[1:])
+		return child.Exists(append(parents, paths[0]), paths[1:], watch, connName)
 	}
 
 	zn.mu.RLock()
 	defer zn.mu.RUnlock()
 
-	return true, zn.version
+	watcherName := ""
+	if watch {
+		watcherName = randstring(16)
+		watcher := watcher{
+			name:     watcherName,
+			path:     "/" + strings.Join(parents, "/"),
+			connName: connName,
+		}
+		zn.ws.addUntriggered(watcher)
+	}
+
+	return true, zn.version, watcherName
 }
 
-func (zn *znode) Get(paths []string) ([]byte, int32, err) {
+func (zn *znode) Get(parents []string, paths []string, watch bool, connName string) ([]byte, int32, string, err) {
 	if len(paths) > 0 {
 		zn.mu.RLock()
 		defer zn.mu.RUnlock()
 
 		child, ok := zn.children[paths[0]]
 		if !ok {
-			return nil, 0, noNode
+			return nil, 0, "", noNode
 		}
-		return child.Get(paths[1:])
+		return child.Get(append(parents, paths[0]), paths[1:], watch, connName)
 	}
 
 	zn.mu.RLock()
 	defer zn.mu.RUnlock()
 
+	watcherName := ""
+	if watch {
+		watcherName = randstring(16)
+		watcher := watcher{
+			name:     watcherName,
+			path:     "/" + strings.Join(parents, "/"),
+			connName: connName,
+		}
+		zn.ws.addUntriggered(watcher)
+	}
+
 	// 这里直接返回data是安全的,因为write总是替换data
-	return zn.data, zn.version, success
+	return zn.data, zn.version, watcherName, success
 }
 
 func (zn *znode) Set(parents []string, paths []string, data []byte, version int32) (int32, err) {
@@ -682,16 +752,16 @@ func (zn *znode) Set(parents []string, paths []string, data []byte, version int3
 	return zn.version, success
 }
 
-func (zn *znode) Children(paths []string) ([]string, int32, err) {
+func (zn *znode) Children(parents []string, paths []string, watch bool, connName string) ([]string, int32, string, err) {
 	if len(paths) > 0 {
 		zn.mu.RLock()
 		defer zn.mu.RUnlock()
 
 		child, ok := zn.children[paths[0]]
 		if !ok {
-			return nil, 0, noNode
+			return nil, 0, "", noNode
 		}
-		return child.Children(paths[1:])
+		return child.Children(append(parents, paths[0]), paths[1:], watch, connName)
 	}
 
 	zn.mu.RLock()
@@ -702,7 +772,18 @@ func (zn *znode) Children(paths []string) ([]string, int32, err) {
 		names = append(names, name)
 	}
 
-	return names, zn.version, success
+	watcherName := ""
+	if watch {
+		watcherName = randstring(16)
+		watcher := watcher{
+			name:     watcherName,
+			path:     "/" + strings.Join(parents, "/"),
+			connName: connName,
+		}
+		zn.ws.addUntriggered(watcher)
+	}
+
+	return names, zn.version, watcherName, success
 }
 
 func (zn *znode) Sync(paths []string) (string, err) {
@@ -732,11 +813,14 @@ func (zn *znode) deleteRecursive(parents []string, name string) {
 
 	directory := "/" + strings.Join(parents, "/")
 	file := directory + "/" + name
+	if child.flags&zk.FlagEphemeral == zk.FlagEphemeral {
+		zn.ws.removeEphemeralZNodes(child.connName, file)
+	}
 	zn.ws.trigger(directory, file)
 }
 
 // 删除临时节点及所有子节点
-func (zn *znode) deleteEphemeral(connName string, parents []string, paths []string) {
+func (zn *znode) deleteEphemeral(parents []string, paths []string, connName string) {
 	if len(paths) == 0 {
 		return
 	}
@@ -749,7 +833,7 @@ func (zn *znode) deleteEphemeral(connName string, parents []string, paths []stri
 		if !ok {
 			return
 		}
-		child.deleteEphemeral(connName, append(parents, paths[0]), paths[1:])
+		child.deleteEphemeral(append(parents, paths[0]), paths[1:], connName)
 		return
 	}
 
@@ -758,7 +842,7 @@ func (zn *znode) deleteEphemeral(connName string, parents []string, paths []stri
 	defer zn.mu.Unlock()
 
 	name := paths[0]
-	// 如果临时节点已被删除,或被重新创建,则不能删除该临时节点
+	// 如果临时节点已被删除,则不能删除该临时节点
 	if child, ok := zn.children[name]; !ok || child.connName != connName || child.flags&zk.FlagEphemeral != zk.FlagEphemeral {
 		return
 	}
@@ -776,7 +860,6 @@ type FakeZKServer struct {
 	ws                *watcherStore
 	root              *znode
 	conns             map[string]*conn
-	connsZNodes       map[string][]string // 每个连接创建的临时节点的列表,连接断开时移除
 	triggeredWatchers map[string][]string
 	dead              int32
 }
@@ -787,7 +870,6 @@ func MakeFakeZKServer() *FakeZKServer {
 	fzks.ws = ws
 	fzks.root = makeZNode("", "", nil, 0, ws)
 	fzks.conns = make(map[string]*conn)
-	fzks.connsZNodes = make(map[string][]string)
 	fzks.triggeredWatchers = make(map[string][]string)
 
 	go fzks.kickOffCleanup()
@@ -838,9 +920,7 @@ func (fzks *FakeZKServer) close(connName string) ([]string, bool) {
 	}
 
 	delete(fzks.conns, connName)
-	znodes := fzks.connsZNodes[connName]
-	delete(fzks.connsZNodes, connName)
-	fzks.ws.removeConn(connName)
+	znodes := fzks.ws.removeConn(connName)
 	delete(fzks.triggeredWatchers, connName)
 
 	return znodes, true
@@ -857,7 +937,7 @@ func (fzks *FakeZKServer) Close(args *CloseArgs, reply *CloseReply) {
 	}
 
 	for _, znode := range znodes {
-		fzks.root.deleteEphemeral(args.ConnName, []string{}, strings.Split(znode[1:], "/"))
+		fzks.root.deleteEphemeral([]string{}, strings.Split(znode[1:], "/"), args.ConnName)
 	}
 	reply.Err = success
 }
@@ -886,7 +966,7 @@ func (fzks *FakeZKServer) RefreshConn(connName string) bool {
 		fzks.mu.Unlock()
 
 		for _, znode := range znodes {
-			fzks.root.deleteEphemeral(connName, []string{}, strings.Split(znode[1:], "/"))
+			fzks.root.deleteEphemeral([]string{}, strings.Split(znode[1:], "/"), connName)
 		}
 		return false
 	}
@@ -910,14 +990,6 @@ func (fzks *FakeZKServer) Create(args *CreateArgs, reply *CreateReply) {
 	if err != success {
 		reply.Err = err
 		return
-	}
-
-	if args.Flags&zk.FlagEphemeral == zk.FlagEphemeral {
-		fzks.mu.Lock()
-		if znodes, ok := fzks.connsZNodes[args.ConnName]; ok {
-			fzks.connsZNodes[args.ConnName] = append(znodes, args.Path[:strings.LastIndexByte(args.Path, '/')+1]+name)
-		}
-		fzks.mu.Unlock()
 	}
 
 	reply.Name = name
@@ -974,18 +1046,7 @@ func (fzks *FakeZKServer) Exists(args *ExistsArgs, reply *ExistsReply) {
 		return
 	}
 	paths := strings.Split(args.Path[1:], "/")
-	ok, version := fzks.root.Exists(paths)
-
-	watcherName := ""
-	if args.Watch {
-		watcherName = randstring(16)
-		watcher := watcher{
-			name:     watcherName,
-			path:     args.Path,
-			connName: args.ConnName,
-		}
-		fzks.ws.addUntriggered(watcher)
-	}
+	ok, version, watcherName := fzks.root.Exists([]string{}, paths, args.Watch, args.ConnName)
 
 	reply.OK = ok
 	reply.Version = version
@@ -1017,27 +1078,12 @@ func (fzks *FakeZKServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	paths := strings.Split(args.Path[1:], "/")
-	data, version, err := fzks.root.Get(paths)
-	if err != success {
-		reply.Err = err
-		return
-	}
-
-	watcherName := ""
-	if args.Watch {
-		watcherName = randstring(16)
-		watcher := watcher{
-			name:     watcherName,
-			path:     args.Path,
-			connName: args.ConnName,
-		}
-		fzks.ws.addUntriggered(watcher)
-	}
+	data, version, watcherName, err := fzks.root.Get([]string{}, paths, args.Watch, args.ConnName)
 
 	reply.Data = data
 	reply.Version = version
 	reply.WatcherName = watcherName
-	reply.Err = success
+	reply.Err = err
 }
 
 type SetArgs struct {
@@ -1064,10 +1110,6 @@ func (fzks *FakeZKServer) Set(args *SetArgs, reply *SetReply) {
 	}
 	paths := strings.Split(args.Path[1:], "/")
 	version, err := fzks.root.Set([]string{}, paths, args.Data, args.Version)
-	if err != success {
-		reply.Err = err
-		return
-	}
 
 	reply.Version = version
 	reply.Err = err
@@ -1097,22 +1139,7 @@ func (fzks *FakeZKServer) Children(args *ChildrenArgs, reply *ChildrenReply) {
 		return
 	}
 	paths := strings.Split(args.Path[1:], "/")
-	children, version, err := fzks.root.Children(paths)
-	if err != success {
-		reply.Err = err
-		return
-	}
-
-	watcherName := ""
-	if args.Watch {
-		watcherName = randstring(16)
-		watcher := watcher{
-			name:     watcherName,
-			path:     args.Path,
-			connName: args.ConnName,
-		}
-		fzks.ws.addUntriggered(watcher)
-	}
+	children, version, watcherName, err := fzks.root.Children([]string{}, paths, args.Watch, args.ConnName)
 
 	reply.Children = children
 	reply.Version = version
@@ -1196,7 +1223,6 @@ func (fzks *FakeZKServer) Connect(args *ConnectArgs, reply *ConnectReply) {
 
 	connName := randstring(16)
 	fzks.conns[connName] = &conn{name: connName, t: time.Now(), sessionTimeout: args.SessionTimeout}
-	fzks.connsZNodes[connName] = make([]string, 0)
 	fzks.ws.addConn(connName)
 
 	reply.ConnName = connName
@@ -1224,7 +1250,7 @@ func (fzks *FakeZKServer) kickOffCleanup() {
 				fzks.mu.Unlock()
 
 				for _, znode := range znodes {
-					fzks.root.deleteEphemeral(conn.name, []string{}, strings.Split(znode[1:], "/"))
+					fzks.root.deleteEphemeral([]string{}, strings.Split(znode[1:], "/"), conn.name)
 				}
 				fzks.mu.Lock()
 			}

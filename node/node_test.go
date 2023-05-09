@@ -280,12 +280,16 @@ func TestAgreementHeaderParitition(t *testing.T) {
 	header1, node11, node12 := chain[0], chain[1], chain[2]
 
 	cfg.enableZookeeper(header1, false)
-	conn, err := makeZKConn(cfg.net, "config")
+	zkClient, err := makeZKClient(cfg.net, "config")
 	if err != nil {
 		cfg.t.Fatal(err)
 	}
-	defer conn.Close()
-	if err = conn.Delete(cfg.nodes[header1].chainPath+"/"+cfg.nodes[header1].name, 0); err != nil {
+	zkConn, err := makeZKConn(zkClient)
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
+	defer zkConn.Close()
+	if err = zkConn.Delete(cfg.nodes[header1].chainPath+"/"+cfg.nodes[header1].name, 0); err != nil {
 		cfg.t.Fatal(err)
 	}
 
@@ -326,7 +330,11 @@ func TestAgreementTailParitition(t *testing.T) {
 	_ = cfg.checkChain(0)
 
 	cfg.enableZookeeper(0, false)
-	if conn, err := makeZKConn(cfg.net, "config"); err != nil {
+	zkClient, err := makeZKClient(cfg.net, "config")
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
+	if conn, err := makeZKConn(zkClient); err != nil {
 		cfg.t.Fatal(err)
 	} else if err = conn.Delete(cfg.nodes[0].chainPath+"/"+cfg.nodes[0].name, 0); err != nil {
 		cfg.t.Fatal(err)

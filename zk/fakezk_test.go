@@ -317,7 +317,7 @@ func TestCreateMany(t *testing.T) {
 	for i := 0; i < len(expected); i++ {
 		expected[i] = fmt.Sprintf("%s%d", file, i+1)
 	}
-	actual, _, _ := cfg.zkServer.root.Children(strings.Split(directory[1:], "/"))
+	actual, _, _, _ := cfg.zkServer.root.Children([]string{}, strings.Split(directory[1:], "/"), false, "")
 	if !StringsEqual(expected, actual) {
 		t.Fatalf("expected: %v, actual: %v", expected, actual)
 	}
@@ -346,7 +346,7 @@ func TestCreateSequencialSingle(t *testing.T) {
 		if _, err := s.create(directory+"/"+file, nil, zk.FlagSequence); err != nil {
 			t.Fatal(err)
 		}
-		expected[i-1] = fmt.Sprintf("%s%d", file, i)
+		expected[i-1] = fmt.Sprintf("%s%010d", file, i)
 	}
 
 	actual, _, _, err := s.children(directory, false)
@@ -400,9 +400,9 @@ func TestCreateSequencialMany(t *testing.T) {
 
 	expected := make([]string, nservers*nfiles)
 	for i := 0; i < len(expected); i++ {
-		expected[i] = fmt.Sprintf("%s%d", file, i+1)
+		expected[i] = fmt.Sprintf("%s%010d", file, i+1)
 	}
-	actual, _, _ := cfg.zkServer.root.Children(strings.Split(directory[1:], "/"))
+	actual, _, _, _ := cfg.zkServer.root.Children([]string{}, strings.Split(directory[1:], "/"), false, "")
 	if !StringsEqual(expected, actual) {
 		t.Fatalf("expected: %v, actual: %v", expected, actual)
 	}

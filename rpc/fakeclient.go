@@ -2,7 +2,7 @@ package rpc
 
 import (
 	"fmt"
-	"log"
+	"os"
 	"sync/atomic"
 )
 
@@ -13,7 +13,8 @@ type FakeClient struct {
 
 func (fc *FakeClient) Call(svcMeth string, args interface{}, reply interface{}) bool {
 	if atomic.LoadInt32(&fc.closed) == 1 {
-		log.Fatalln("client has been closed")
+		fmt.Fprintln(os.Stderr, "client has been closed")
+		return false
 	}
 	return fc.end.Call(svcMeth, args, reply)
 }

@@ -67,7 +67,8 @@ type Node struct {
 	mu sync.Mutex // 排他锁,用于互斥变量的修改和访问
 
 	// 常量:
-	zkConn     izk.ZKConn      // zkConn: 与zookeeper服务集群建立的连接
+	zkClient   izk.ZKClient    // zkClient: 用于创建zookeeper连接,在kickOffCommit中使用
+	zkConn     izk.ZKConn      // zkConn: 与zookeeper服务集群建立的连接,常量,不要用zkClient创建的连接替换
 	clients    rpc.Clients     // 用于创建邻居节点rpc服务的客户端
 	chainPath  string          // 链表在zookeeper中的文件夹路径,形如/chain/chain1
 	prefix     string          // 节点名的前缀
@@ -75,12 +76,6 @@ type Node struct {
 	commitPath string          // 尾节点提交的日志索引在zookeeper中的文件路径,形如/commit/chain1
 	applyCh    chan<- ApplyMsg // 执行channel,用于接收已经提交的Log中的Command
 	persister  persister.Persister
-
-	// 原子变量:
-	// 节点是否死亡
-	dead int32
-
-	// 互斥变量:
 	// name: 节点在zookeeper相应的链表路径(/chain/chain1)下创建的文件的名称,由两部分构成${prefix}${index}
 	// 其中prefix是一个固定字符串,可以自由选择,但必须是常量;index是一个递增的正整数,由zookeeper在创建文件时自动生成
 	// 当节点与zookeeper连接成功时,应当在链表路径(/chain/chain1)下创建一个文件,表示节点加入链表中,并将name更新为创建的文件名
@@ -88,16 +83,21 @@ type Node struct {
 	// 如何创建临时文件(自动删除)和序列文件(文件名追加递增的正整数的)可见ZKConn.Get
 	name string
 
+	// 原子变量:
+	// 节点是否死亡
+	dead int32
+
+	// 互斥变量:
 	prev        *Neighbour // 前驱节点
 	next        *Neighbour // 后继节点
 	Logs        []Log      // 日志列表
 	CommitIndex int        // 已提交的最新日志的索引
 	lastApplied int        // 发送到applyCh的最新日志的索引,初始值为CommitIndex
-
 }
 
-func MakeNode(zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix string, address string, commitPath string, persister persister.Persister, applyCh chan<- ApplyMsg) *Node {
+func MakeNode(zkClient izk.ZKClient, zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix string, address string, commitPath string, persister persister.Persister, applyCh chan<- ApplyMsg) *Node {
 	node := &Node{}
+	node.zkClient = zkClient
 	node.zkConn = zkConn
 	node.clients = clients
 	node.chainPath = chainPath
@@ -152,8 +152,6 @@ func (node *Node) readPersist(data []byte) {
 
 // 监控链表,每当链表发生变化时,重新从zookeeper获取最新的链表信息
 func (node *Node) watchChain() {
-	commitGoroutine := int32(0)
-
 	for {
 		// 如果服务器被Kill,应当停止对链表的监控
 		if node.Killed() {
@@ -299,13 +297,7 @@ func (node *Node) watchChain() {
 
 		// 尾节点需要启动在本地提交日志的线程
 		if next == "" {
-			if atomic.CompareAndSwapInt32(&commitGoroutine, 0, 1) {
-				go func() {
-					defer atomic.StoreInt32(&commitGoroutine, 0)
-
-					node.kickOffCommit()
-				}()
-			}
+			go node.kickOffCommit()
 		}
 
 		// 6.等待node.chainPath文件夹的变化
@@ -343,12 +335,16 @@ func (node *Node) kickOffCopy() {
 			var reply LastIndexReply
 			node.mu.Unlock()
 
+			DPrintf("[node %s %s] sends query last index to cached next: %s, cachedLastCopied: %d\n", node.name, node.address, next.name, cachedLastCopied)
+
 			// 节点不匹配,重置cachedNext和cachedLastCopied
 			if !next.client.Call("Node.QueryLastIndex", &args, &reply) || reply.Err != success {
 				cachedNext = ""
 				cachedLastCopied = -1
 				continue
 			}
+
+			DPrintf("[node %s %s] successfully sends query last index to cached next: %s, cachedLastCopied: %d\n", node.name, node.address, next.name, cachedLastCopied)
 
 			// 更新cachedNext和cachedLastCopied
 			cachedNext = next.name
@@ -371,13 +367,15 @@ func (node *Node) kickOffCopy() {
 		var reply SendLogsReply
 		node.mu.Unlock()
 
-		DPrintf("[node %s %s] send logs: %v, nextIndex: %d to cached next: %s, cachedLastCopied: %d\n", node.name, node.address, args.Logs, args.NextIndex, next.name, cachedLastCopied)
+		DPrintf("[node %s %s] sends logs: %v, nextIndex: %d to cached next: %s, cachedLastCopied: %d\n", node.name, node.address, args.Logs, args.NextIndex, next.name, cachedLastCopied)
 
 		if !next.client.Call("Node.SendLogs", &args, &reply) || reply.Err != success {
 			cachedNext = ""
 			cachedLastCopied = -1
 			continue
 		}
+
+		DPrintf("[node %s %s] successfully sends logs to cached next: %s, cachedLastCopied: %d\n", node.name, node.address, next.name, cachedLastCopied)
 
 		// 2.更新cachedNext和cachedLastCopied
 		cachedNext = next.name
@@ -404,12 +402,12 @@ func (node *Node) QueryLastIndex(args *LastIndexArgs, reply *LastIndexReply) {
 	prev := node.prev
 
 	if prev == nil {
-		DPrintf("[node %s %s] recieve query last index, from nodeName: %v, but node is not in chain\n", node.name, node.address, args.NodeName)
+		DPrintf("[node %s %s] recieves query last index, from nodeName: %v, but node is not in chain\n", node.name, node.address, args.NodeName)
 
 		reply.Err = notinchain
 		return
 	} else if prev.name != args.NodeName {
-		DPrintf("[node %s %s] recieve query last index, from nodeName: %v, actual prev: %s\n", node.name, node.address, args.NodeName, prev.name)
+		DPrintf("[node %s %s] recieves query last index, from nodeName: %v, actual prev: %s\n", node.name, node.address, args.NodeName, prev.name)
 
 		reply.Err = mismatch
 		return
@@ -441,12 +439,12 @@ func (node *Node) SendLogs(args *SendLogsArgs, reply *SendLogsReply) {
 	prev := node.prev
 
 	if prev == nil {
-		DPrintf("[node %s %s] recieve logs: %v, nextIndex: %d from %s, but node is not in chain\n", node.name, node.address, args.Logs, args.NextIndex, args.NodeName)
+		DPrintf("[node %s %s] recieves logs: %v, nextIndex: %d from %s, but node is not in chain\n", node.name, node.address, args.Logs, args.NextIndex, args.NodeName)
 
 		reply.Err = notinchain
 		return
 	} else if prev.name != args.NodeName {
-		DPrintf("[node %s %s] recieve logs: %v, nextIndex: %d from %s, actual prev: %v, length of logs: %d\n", node.name, node.address, args.Logs, args.NextIndex, args.NodeName, prev, len(node.Logs))
+		DPrintf("[node %s %s] recieves logs: %v, nextIndex: %d from %s, actual prev: %v, length of logs: %d\n", node.name, node.address, args.Logs, args.NextIndex, args.NodeName, prev, len(node.Logs))
 
 		reply.Err = mismatch
 		return
@@ -468,6 +466,7 @@ func (node *Node) SendLogs(args *SendLogsArgs, reply *SendLogsReply) {
 // 直接在本地提交日志,只有尾节点才能调用,且同时只能有一个节点调用该函数
 func (node *Node) kickOffCommit() {
 	// 1.尝试获取提交锁,确保只有一个节点能够在本地提交并更新zookeeper中存储的提交索引
+	var zkConn izk.ZKConn
 	for {
 		if node.Killed() {
 			return
@@ -475,29 +474,42 @@ func (node *Node) kickOffCommit() {
 
 		time.Sleep(10 * time.Millisecond)
 
+		// 不再是尾节点,退出循环
 		node.mu.Lock()
-		if next := node.next; next == nil || next.name != "" {
+		if node.next == nil || node.next.name != "" {
 			node.mu.Unlock()
 			return
 		}
 		node.mu.Unlock()
 
-		if _, err := node.zkConn.Create(node.commitPath+"Lock", []byte(node.name), zk.FlagEphemeral); err == nil {
-			break
-		}
-
-		data, _, eventCh, err := node.zkConn.Get(node.commitPath+"Lock", true)
+		// 每次获取锁都创建一个新的连接,并关闭之前的连接,避免死锁
+		conn, err := node.zkClient.Connect()
 		if err != nil {
 			continue
 		}
-		if string(data) == node.name {
-			go func() { <-eventCh }()
+
+		// 尝试获取锁
+		if _, err := conn.Create(node.commitPath+"Lock", nil, zk.FlagEphemeral); err == nil {
+			zkConn = conn
 			break
+		}
+		// 只要客户端没有接收到创建成功的消息,就立刻关闭连接
+		conn.Close()
+
+		// 等待锁文件释放,由于conn已经释放,用node.zkConn
+		ok, _, eventCh, err := node.zkConn.Exists(node.commitPath+"Lock", true)
+		if err != nil {
+			continue
+		}
+		if !ok {
+			go func() { <-eventCh }()
+			continue
 		}
 		<-eventCh
 	}
+	defer zkConn.Close()
 
-	DPrintf("[node %s %s] get commit lock\n", node.name, node.address)
+	DPrintf("[node %s %s] acquires commit lock\n", node.name, node.address)
 
 	// 2.不断在本地提交日志,并将提交索引更新到zookeeper中
 	for {
@@ -526,7 +538,7 @@ func (node *Node) kickOffCommit() {
 		node.mu.Unlock()
 
 		// 2.1从zookeeper读取node.commitPath文件的内容
-		data, version, _, err := node.zkConn.Get(node.commitPath, false)
+		data, version, _, err := zkConn.Get(node.commitPath, false)
 		if err != nil {
 			continue
 		}
@@ -538,7 +550,7 @@ func (node *Node) kickOffCommit() {
 
 		// 2.3如果节点最新的日志的索引大于commitPath,则将该索引存储到commitPath文件中
 		if storedCommitIndex < commitIndex {
-			if _, err := node.zkConn.Set(node.commitPath, []byte(strconv.Itoa(commitIndex)), version); err != nil {
+			if _, err := zkConn.Set(node.commitPath, []byte(strconv.Itoa(commitIndex)), version); err != nil {
 				continue
 			}
 		}
@@ -554,8 +566,7 @@ func (node *Node) kickOffCommit() {
 		node.mu.Unlock()
 	}
 
-	// 3.释放锁
-	node.zkConn.Delete(node.commitPath+"Lock", 0)
+	DPrintf("[node %s %s] releases commit lock\n", node.name, node.address)
 }
 
 // 不断向前驱节点确认最新提交的日志
@@ -610,6 +621,8 @@ func (node *Node) kickOffAck() {
 			continue
 		}
 
+		DPrintf("[node %s %s] successfully sends ack to cached prev: %s, cachedLastAck: %d\n", node.name, node.address, prev.name, cachedLastAck)
+
 		// 2.更新cachedNext和cachedLastCopied
 		cachedPrev = prev.name
 		cachedLastAck = reply.CommitIndex
@@ -636,12 +649,12 @@ func (node *Node) Ack(args *AckArgs, reply *AckReply) {
 	next := node.next
 
 	if next == nil {
-		DPrintf("[node %s %s] receive ack: %d from %s, but node is not in chain\n", node.name, node.address, args.CommitIndex, args.NodeName)
+		DPrintf("[node %s %s] receives ack: %d from %s, but node is not in chain\n", node.name, node.address, args.CommitIndex, args.NodeName)
 
 		reply.Err = notinchain
 		return
 	} else if next.name != args.NodeName {
-		DPrintf("[node %s %s] receive ack: %d from %s, actual next: %v\n", node.name, node.address, args.CommitIndex, args.NodeName, next.name)
+		DPrintf("[node %s %s] receives ack: %d from %s, actual next: %v\n", node.name, node.address, args.CommitIndex, args.NodeName, next.name)
 
 		reply.Err = mismatch
 		return
@@ -722,7 +735,17 @@ func (node *Node) GetNeighbours() (string, string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 
-	return node.prev.name, node.next.name
+	var prevName, nextName string
+
+	if node.prev != nil {
+		prevName = node.prev.name
+	}
+
+	if node.next != nil {
+		nextName = node.next.name
+	}
+
+	return prevName, nextName
 }
 
 func (node *Node) IsHead() bool {

@@ -88,3 +88,65 @@ Test (Persistence): test persistence (unreliable) ...
   ... Passed --   6.2   342   51529   20  
 PASS  
 ok      crfs/node       26.176s  
+
+## Task 2 实现chunk服务器
+
+### 功能介绍
+
+在每一台服务器上，分别启动chunk进程和node进程。chunk进程负责处理客户端发送的块读写请求，并将请求的内容发送给node进程。node完成一致性协议后会通过applyCh信道提交相应的请求，chunk进程需要监听这个信道，每当有新提交的请求，就将请求从信道中取出，并交给本地的执行器执行。执行器执行完后chunk进程将执行结果返回给客户端。架构如下：
+
+![chunk架构](./architecture.jpg)
+
+### 要求
+
+实现客户端操作和执行器。
+
+客户端操作，即Write、Append、Read，用一个客户端编号ClerkId和一个请求编号RequestId唯一标识，对于同一个客户端，请求编号从1开始递增。delete是内部操作，无需标识。
+
+1. 实现Write的rpc服务，实现流程如下：
+   1. 收到客户端的rpc请求，检查resultMap[ClerkId]返回结果中的RequestId是否等于Write操作的RequestId，如果等于，表明执行器执行完该请求，将该结果返回给客户端。
+   2. 将Write操作封装成Op对象，调用node.Start(op)开始一致性协议。
+   3. 如果Start返回false，则直接返回persister.WrongHead错误，表明该服务器不是头节点，不能开始一致性协议。
+   4. 进入无限循环，不断检查resultMap[ClerkId]返回结果中的RequestId是否等于Write操作的RequestId，如果等于，表明执行器执行完该请求，将该结果返回给客户端，退出循环。
+2. 实现Append的rpc服务，实现流程与Write一致。
+3. 实现Read的rpc服务，实现流程如下：
+   1. 收到客户端的rpc请求，检查resultMap[ClerkId]返回结果中的RequestId是否等于Get操作的RequestId，如果等于，表明执行器执行完该请求，将该结果返回给客户端。
+   2. 调用node.LastCommittedIndex获取当前zookeeper提交的日志索引。
+   3. 进入无限循环，如果cs.lastApplied >= lastCommittedIndex，将Read操作添加到相应chunk的任务队列的末尾，退出循环。
+   4. 进入无限循环，不断检查resultMap[ClerkId]返回结果中的RequestId是否等于Get操作的RequestId，如果等于，表明执行器执行完该请求，将该结果返回给客户端，退出循环。
+4. 实现本地的delete函数，实现流程如下：
+   1. 将delete操作封装成Op对象，调用node.Start(op)开始一致性协议。
+   2. 如果Start返回false，则直接返回persister.WrongHead错误，表明该服务器不是头节点，不能开始一致性协议。
+   3. 进入无限循环，如果cs.lastApplied >= index（Start函数的返回值），则返回persister.Success。
+5. 实现任务队列，实现流程如下：
+   - chunk服务器从node收到提交的更新操作，即Write、Append和delete操作后，将该操作添加到相应chunk的任务队列的末尾，由单独的线程按顺序执行任务队列中的操作。
+   - 每个chunk有一个执行线程，负责循环读取任务队列中首个操作，然后调用persister相应的文件读写函数，如persister.Write()。执行完毕后更新resultMap[ClerkId]。
+
+### 提示
+
+- 补全ChunkServer.Write的步骤1-4。
+- 补全ChunkServer.Append的步骤1-4。
+- 补全ChunkServer.Read的步骤1-4。
+- 补全ChunkServer.delete的步骤1-3。
+- 补全ChunkServer.apply的步骤1。
+
+### 测试
+
+在crfs/node路径下执行go test命令，以下输出表示通过测试：
+
+Test: one client ...
+  ... Passed --   7.7  3  1355  149
+Test: many clients ...
+  ... Passed --  14.2  3  4324  669
+Test: unreliable net, many clients ...
+  ... Passed --  12.7  3  1829  222
+Test: concurrent append to same chunk, unreliable ...
+  ... Passed --   3.1  3   683  101
+Test: restarts, one client ...
+  ... Passed --  25.8  3  1768  168
+Test: restarts, many clients ...
+  ... Passed --  38.1  3  4461  651
+Test: unreliable net, restarts, many clients ...
+  ... Passed --  31.8  3  2324  204
+PASS
+ok      crfs/chunkserver        133.548s

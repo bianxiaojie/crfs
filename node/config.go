@@ -80,14 +80,18 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	cfg.net.MakeEnd(clientAddress + "-" + zoo)
 	cfg.net.Connect(clientAddress+"-"+zoo, zoo)
 	cfg.net.Enable(clientAddress+"-"+zoo, true)
-	conn, err := makeZKConn(net, clientAddress)
+	zkClient, err := makeZKClient(net, clientAddress)
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn.Create("/chain", nil, 0)
-	conn.Create("/commit", nil, 0)
-	conn.Create("/commit/chain", []byte(strconv.Itoa(-1)), 0)
-	conn.Close()
+	zkConn, err := makeZKConn(zkClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zkConn.Create("/chain", nil, 0)
+	zkConn.Create("/commit", nil, 0)
+	zkConn.Create("/commit/chain", []byte(strconv.Itoa(-1)), 0)
+	zkConn.Close()
 
 	// 初始化节点地址
 	cfg.addresses = make([]string, n)
@@ -140,7 +144,11 @@ func (cfg *config) startOne(i int) {
 
 	// 连接zookeeper
 	cfg.enableZookeeper(i, true)
-	conn, err := makeZKConn(cfg.net, nodeAddress)
+	zkClient, err := makeZKClient(cfg.net, nodeAddress)
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
+	zkConn, err := makeZKConn(zkClient)
 	if err != nil {
 		cfg.t.Fatal(err)
 	}
@@ -182,7 +190,7 @@ func (cfg *config) startOne(i int) {
 			}
 		}
 	}()
-	node := MakeNode(conn, clients, "/chain", "", nodeAddress, "/commit/chain", cfg.saved[i], applyCh)
+	node := MakeNode(zkClient, zkConn, clients, "/chain", "", nodeAddress, "/commit/chain", cfg.saved[i], applyCh)
 
 	cfg.nodes[i] = node
 
@@ -224,18 +232,20 @@ func (cfg *config) enableZookeeper(i int, enabled bool) {
 	cfg.connected[i] = enabled
 }
 
-func makeZKConn(net *rpc.Network, address string) (izk.ZKConn, error) {
+func makeZKClient(net *rpc.Network, address string) (izk.ZKClient, error) {
 	clients := rpc.MakeFakeClients(net, address)
 	client, err := clients.MakeClient(zoo)
 	if err != nil {
 		return nil, err
 	}
 
-	fzkc := izk.MakeFakeZKClient(client, []string{zoo}, sessionTimeout)
+	return izk.MakeFakeZKClient(client, []string{zoo}, sessionTimeout), nil
+}
 
+func makeZKConn(zkClient izk.ZKClient) (izk.ZKConn, error) {
 	start := time.Now()
 	for time.Since(start) <= sessionTimeout {
-		if conn, err := fzkc.Connect(); err == nil {
+		if conn, err := zkClient.Connect(); err == nil {
 			return conn, nil
 		}
 		time.Sleep(10 * time.Millisecond)

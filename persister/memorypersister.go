@@ -7,15 +7,6 @@ import (
 	"sync"
 )
 
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type chunk struct {
 	data    []byte
 	version int
@@ -98,7 +89,6 @@ func (ps *MemoryPersister) WriteChunk(chunkName string, offset int, data []byte)
 	ps.mu.Unlock()
 
 	if offset < 0 || offset+len(data) > MaxChunkSize {
-		DPrintf("write out of chunk, chunkName: %s, offset: %d, data size: %d, max size: %d\n", chunkName, offset, len(data), MaxChunkSize)
 		return OutOfChunk
 	}
 
@@ -134,8 +124,7 @@ func (ps *MemoryPersister) AppendChunk(chunkName string, data []byte) (int, Err)
 	offset := len(chunkData)
 	ps.mu.Unlock()
 
-	if offset < 0 || offset+len(data) > MaxChunkSize {
-		DPrintf("append out of chunk, chunkName: %s, data size: %d, max size: %d\n", chunkName, len(data), MaxChunkSize)
+	if offset+len(data) > MaxChunkSize {
 		return -1, OutOfChunk
 	}
 
@@ -160,18 +149,27 @@ func (ps *MemoryPersister) ReadChunk(chunkName string, offset int, size int) ([]
 	ps.mu.Unlock()
 
 	if offset < 0 || size < 0 || offset+size > len(input) {
-		DPrintf("read out of chunk, chunkName: %s, offset: %d, size: %d, actual data: %d\n", chunkName, offset, size, len(input))
 		return nil, OutOfChunk
 	}
 
 	return input[offset : offset+size], Success
 }
 
-func (ps *MemoryPersister) DeleteChunk(chunkName string) Err {
+func (ps *MemoryPersister) DeleteChunk(chunkName string) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 
 	delete(ps.chunkMap, chunkName)
+}
 
-	return Success
+func (ps *MemoryPersister) ChunkNames() []string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	chunkNames := make([]string, 0, len(ps.chunkMap))
+	for k := range ps.chunkMap {
+		chunkNames = append(chunkNames, k)
+	}
+
+	return chunkNames
 }

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crfs/common"
 	"crfs/persister"
 	"crfs/rpc"
 	izk "crfs/zk"
@@ -9,7 +10,6 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -44,7 +44,7 @@ type config struct {
 	t         *testing.T
 	net       *rpc.Network
 	zkServer  *izk.FakeZKServer
-	addresses []string
+	ips       []string
 	connected []bool // 是否与zookeeper正在连接
 	logs      []map[int]interface{}
 	nodes     []*Node
@@ -76,28 +76,11 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	srv.AddService(svc)
 	net.AddServer(zoo, srv)
 
-	clientAddress := "config"
-	cfg.net.MakeEnd(clientAddress + "-" + zoo)
-	cfg.net.Connect(clientAddress+"-"+zoo, zoo)
-	cfg.net.Enable(clientAddress+"-"+zoo, true)
-	zkClient, err := makeZKClient(net, clientAddress)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zkConn, err := makeZKConn(zkClient)
-	if err != nil {
-		t.Fatal(err)
-	}
-	zkConn.Create("/chain", nil, 0)
-	zkConn.Create("/commit", nil, 0)
-	zkConn.Create("/commit/chain", []byte(strconv.Itoa(-1)), 0)
-	zkConn.Close()
-
 	// 初始化节点地址
-	cfg.addresses = make([]string, n)
+	cfg.ips = make([]string, n)
 	ip := [4]byte{192, 168, 0, 1}
 	for i := 0; i < n; i++ {
-		cfg.addresses[i] = IPToString(ip)
+		cfg.ips[i] = IPToString(ip)
 		ip = IPAddOne(ip)
 	}
 
@@ -105,12 +88,12 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	for i := 0; i < n; i++ {
 		for j := 0; j < n; j++ {
 			if i != j {
-				cfg.net.MakeEnd(cfg.addresses[i] + "-" + cfg.addresses[j])
-				cfg.net.Connect(cfg.addresses[i]+"-"+cfg.addresses[j], cfg.addresses[j])
+				cfg.net.MakeEnd(fmt.Sprintf("%s-%s:%d", cfg.ips[i], cfg.ips[j], common.NodePort))
+				cfg.net.Connect(fmt.Sprintf("%s-%s:%d", cfg.ips[i], cfg.ips[j], common.NodePort), cfg.ips[j])
 			}
 		}
-		cfg.net.MakeEnd(cfg.addresses[i] + "-" + zoo)
-		cfg.net.Connect(cfg.addresses[i]+"-"+zoo, zoo)
+		cfg.net.MakeEnd(cfg.ips[i] + "-" + zoo)
+		cfg.net.Connect(cfg.ips[i]+"-"+zoo, zoo)
 	}
 
 	cfg.connected = make([]bool, n)
@@ -133,7 +116,6 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 func (cfg *config) startOne(i int) {
 	cfg.crashOne(i)
 
-	nodeAddress := cfg.addresses[i]
 	// 连接其他节点
 	for j := 0; j < len(cfg.nodes); j++ {
 		if i != j {
@@ -144,15 +126,12 @@ func (cfg *config) startOne(i int) {
 
 	// 连接zookeeper
 	cfg.enableZookeeper(i, true)
-	zkClient, err := makeZKClient(cfg.net, nodeAddress)
+	zkClient, err := makeZKClient(cfg.net, cfg.ips[i])
 	if err != nil {
 		cfg.t.Fatal(err)
 	}
-	zkConn, err := makeZKConn(zkClient)
-	if err != nil {
-		cfg.t.Fatal(err)
-	}
-	clients := rpc.MakeFakeClients(cfg.net, nodeAddress)
+
+	clients := rpc.MakeFakeClients(cfg.net, cfg.ips[i])
 
 	// 确保同一个Persister只有一个节点在使用
 	if cfg.saved[i] != nil {
@@ -190,7 +169,7 @@ func (cfg *config) startOne(i int) {
 			}
 		}
 	}()
-	node := MakeNode(zkClient, zkConn, clients, "/chain", "", nodeAddress, "/commit/chain", cfg.saved[i], applyCh)
+	node := MakeNode(zkClient, clients, fmt.Sprintf("%s:%d", cfg.ips[i], common.NodePort), common.ZKChainNode+"/chain1", common.ZKCommitNode+"/chain1", cfg.saved[i], applyCh)
 
 	cfg.nodes[i] = node
 
@@ -198,7 +177,7 @@ func (cfg *config) startOne(i int) {
 	svc := rpc.MakeService(node)
 	srv := rpc.MakeServer()
 	srv.AddService(svc)
-	cfg.net.AddServer(nodeAddress, srv)
+	cfg.net.AddServer(cfg.ips[i], srv)
 }
 
 func (cfg *config) crashOne(i int) {
@@ -208,7 +187,7 @@ func (cfg *config) crashOne(i int) {
 			cfg.enable(j, i, false)
 		}
 	}
-	cfg.net.DeleteServer(cfg.addresses[i])
+	cfg.net.DeleteServer(cfg.ips[i])
 
 	cfg.enableZookeeper(i, false)
 
@@ -224,11 +203,11 @@ func (cfg *config) crashOne(i int) {
 }
 
 func (cfg *config) enable(i, j int, enabled bool) {
-	cfg.net.Enable(cfg.addresses[i]+"-"+cfg.addresses[j], enabled)
+	cfg.net.Enable(fmt.Sprintf("%s-%s:%d", cfg.ips[i], cfg.ips[j], common.NodePort), enabled)
 }
 
 func (cfg *config) enableZookeeper(i int, enabled bool) {
-	cfg.net.Enable(cfg.addresses[i]+"-"+zoo, enabled)
+	cfg.net.Enable(cfg.ips[i]+"-"+zoo, enabled)
 	cfg.connected[i] = enabled
 }
 
@@ -244,7 +223,7 @@ func makeZKClient(net *rpc.Network, address string) (izk.ZKClient, error) {
 
 func makeZKConn(zkClient izk.ZKClient) (izk.ZKConn, error) {
 	start := time.Now()
-	for time.Since(start) <= sessionTimeout {
+	for time.Since(start) < sessionTimeout {
 		if conn, err := zkClient.Connect(); err == nil {
 			return conn, nil
 		}

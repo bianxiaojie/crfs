@@ -113,11 +113,7 @@ type ZKConn interface {
 
 type ZKClient interface {
 	// 连接zookeeper集群
-	// 例子: zkConn, err := Connect(servers, sessionTimeout)
-	//
-	// 参数
-	// servers: zookeeper集群地址
-	// sessionTimeout: 连接的超时时长,当客户端和zookeeper服务器超过sessionTimeout没有通信时,连接会自动断开
+	// 例子: zkConn, err := zkClient.Connect()
 	//
 	// 返回值
 	// ZKConn: zookeeper连接

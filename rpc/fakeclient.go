@@ -36,14 +36,14 @@ func MakeFakeClients(rn *Network, servername string) *FakeClients {
 	return fcs
 }
 
-func (fcs *FakeClients) MakeClient(serverAddr string) (Client, error) {
-	endname := fmt.Sprintf("%s-%s", fcs.me, serverAddr)
+func (fcs *FakeClients) MakeClient(address string) (Client, error) {
+	endname := fmt.Sprintf("%s-%s", fcs.me, address)
 	end, ok := fcs.net.GetEnd(endname)
 	if !ok {
-		return nil, fmt.Errorf("服务器%s不存在", serverAddr)
+		return nil, fmt.Errorf("服务器%s不存在", address)
 	}
-	fc := FakeClient{
+	fc := &FakeClient{
 		end: end,
 	}
-	return &fc, nil
+	return fc, nil
 }

@@ -1,14 +1,16 @@
-package chunkserver
+package test
 
 import (
+	"crfs/chunkserver"
+	"crfs/client"
 	"crfs/common"
+	"crfs/master"
 	"crfs/persister"
 	"crfs/rpc"
 	izk "crfs/zk"
 	crand "crypto/rand"
 	"encoding/base64"
 	"fmt"
-	"math/big"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -18,131 +20,9 @@ import (
 
 const (
 	masterAddress  = "master"
-	zoo            = "zoo"
+	zooAddress     = "zoo"
 	sessionTimeout = time.Second
 )
-
-func nrand() int64 {
-	max := big.NewInt(int64(1) << 60)
-	bigx, _ := crand.Int(crand.Reader, max)
-	x := bigx.Int64()
-	return x
-}
-
-type clerk struct {
-	clients   []rpc.Client
-	id        int64
-	requestid int64
-}
-
-func makeClerk(clients []rpc.Client) *clerk {
-	c := &clerk{}
-	c.clients = clients
-	c.id = nrand()
-	return c
-}
-
-func (c *clerk) write(chunkName string, offset int, data []byte) persister.Err {
-	c.requestid++
-
-	var err persister.Err
-	i := 0
-	for {
-		args := WriteArgs{
-			ChunkName: chunkName,
-			Offset:    offset,
-			Data:      data,
-			ClerkId:   c.id,
-			RequestId: c.requestid,
-		}
-		var reply WriteReply
-
-		if c.clients[i].Call("ChunkServer.Write", &args, &reply) && (reply.Err == persister.Success || reply.Err == persister.OutOfChunk) {
-			DPrintf("[client %d] finishes write: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-			err = reply.Err
-			break
-		}
-
-		DPrintf("[client %d] fails to write: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-		i = (i + 1) % len(c.clients)
-		if i == 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-
-	return err
-}
-
-func (c *clerk) append(chunkName string, data []byte) (int, persister.Err) {
-	c.requestid++
-
-	var offset int
-	var err persister.Err
-	i := 0
-	for {
-		args := AppendArgs{
-			ChunkName: chunkName,
-			Data:      data,
-			ClerkId:   c.id,
-			RequestId: c.requestid,
-		}
-		var reply AppendReply
-
-		if c.clients[i].Call("ChunkServer.Append", &args, &reply) && (reply.Err == persister.Success || reply.Err == persister.OutOfChunk) {
-			DPrintf("[client %d] finishes append: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-			offset = reply.Offset
-			err = reply.Err
-			break
-		}
-
-		DPrintf("[client %d] fails to append: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-		i = (i + 1) % len(c.clients)
-		if i == 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-
-	return offset, err
-}
-
-func (c *clerk) read(chunkName string, offset int, size int) ([]byte, persister.Err) {
-	c.requestid++
-
-	var data []byte
-	var err persister.Err
-	i := 0
-	for {
-		args := ReadArgs{
-			ChunkName: chunkName,
-			Offset:    offset,
-			Size:      size,
-			ClerkId:   c.id,
-			RequestId: c.requestid,
-		}
-		var reply ReadReply
-
-		if c.clients[i].Call("ChunkServer.Read", &args, &reply) && (reply.Err == persister.Success || reply.Err == persister.OutOfChunk) {
-			DPrintf("[client %d] finishes read: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-			data = reply.Data
-			err = reply.Err
-			break
-		}
-
-		DPrintf("[client %d] fails to read: %v, requestId: %d\n", c.id, reply.Err, c.requestid)
-
-		i = (i + 1) % len(c.clients)
-		if i == 0 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-
-	return data, err
-}
 
 func IPAddOne(ip [4]byte) [4]byte {
 	ipUint32 := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
@@ -172,9 +52,10 @@ type config struct {
 	mu           sync.Mutex
 	t            *testing.T
 	net          *rpc.Network
+	master       *master.Master
 	zkServer     *izk.FakeZKServer
-	chunkServers []*ChunkServer
-	clerks       map[*clerk]string
+	chunkServers []*chunkserver.ChunkServer
+	clients      map[*client.Client]string
 	ips          []string
 	saved        []persister.Persister
 
@@ -193,12 +74,23 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 	net := rpc.MakeNetwork()
 	cfg.net = net
 
-	zkServer := izk.MakeFakeZKServer()
-	cfg.zkServer = zkServer
-	svc := rpc.MakeService(zkServer)
+	done := make(chan bool)
+	master := master.MakeMaster("", 24*time.Hour, 3*24*time.Hour, done)
+	go func() {
+		<-done
+	}()
+	cfg.master = master
+	svc := rpc.MakeService(master)
 	srv := rpc.MakeServer()
 	srv.AddService(svc)
-	net.AddServer(zoo, srv)
+	net.AddServer(masterAddress, srv)
+
+	zkServer := izk.MakeFakeZKServer()
+	cfg.zkServer = zkServer
+	svc = rpc.MakeService(zkServer)
+	srv = rpc.MakeServer()
+	srv.AddService(svc)
+	net.AddServer(zooAddress, srv)
 
 	// 初始化节点地址
 	cfg.ips = make([]string, n)
@@ -216,12 +108,14 @@ func makeConfig(t *testing.T, n int, unreliable bool) *config {
 				cfg.net.Connect(fmt.Sprintf("%s-%s:%d", cfg.ips[i], cfg.ips[j], common.NodePort), cfg.ips[j])
 			}
 		}
-		cfg.net.MakeEnd(cfg.ips[i] + "-" + zoo)
-		cfg.net.Connect(cfg.ips[i]+"-"+zoo, zoo)
+		cfg.net.MakeEnd(cfg.ips[i] + "-" + masterAddress)
+		cfg.net.Connect(cfg.ips[i]+"-"+masterAddress, masterAddress)
+		cfg.net.MakeEnd(cfg.ips[i] + "-" + zooAddress)
+		cfg.net.Connect(cfg.ips[i]+"-"+zooAddress, zooAddress)
 	}
 
-	cfg.chunkServers = make([]*ChunkServer, n)
-	cfg.clerks = make(map[*clerk]string)
+	cfg.chunkServers = make([]*chunkserver.ChunkServer, n)
+	cfg.clients = make(map[*client.Client]string)
 	cfg.saved = make([]persister.Persister, n)
 
 	for i := 0; i < n; i++ {
@@ -246,13 +140,20 @@ func (cfg *config) startOne(i int) {
 	}
 
 	// 连接zookeeper
-	cfg.net.Enable(cfg.ips[i]+"-"+zoo, true)
+	cfg.net.Enable(cfg.ips[i]+"-"+zooAddress, true)
 	zkClient, err := makeZKClient(cfg.net, cfg.ips[i])
 	if err != nil {
 		cfg.t.Fatal(err)
 	}
 
 	clients := rpc.MakeFakeClients(cfg.net, cfg.ips[i])
+
+	// 连接master
+	cfg.net.Enable(cfg.ips[i]+"-"+masterAddress, true)
+	masterClient, err := clients.MakeClient(masterAddress)
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
 
 	// 确保同一个Persister只有一个节点在使用
 	if cfg.saved[i] != nil {
@@ -261,8 +162,26 @@ func (cfg *config) startOne(i int) {
 		cfg.saved[i] = persister.MakeMemoryPersister()
 	}
 
+	var allocateServerReply master.AllocateServerReply
+	for {
+		args := master.AllocateServerArgs{
+			ChunkServer: cfg.ips[i],
+		}
+		var reply master.AllocateServerReply
+
+		if masterClient.Call("Master.AllocateServer", &args, &reply) {
+			allocateServerReply = reply
+			break
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	chainPath := common.ZKChainNode + "/" + allocateServerReply.ChainName
+	commitPath := common.ZKCommitNode + "/" + allocateServerReply.ChainName
+
 	done := make(chan bool)
-	cs := MakeChunkServer(nil, zkClient, clients, cfg.ips[i], common.ZKChainNode+"/chain1", common.ZKCommitNode+"/chain1", 0, cfg.saved[i], done)
+	cs := chunkserver.MakeChunkServer(masterClient, zkClient, clients, cfg.ips[i], chainPath, commitPath, 24*time.Hour, cfg.saved[i], done)
 	go func() {
 		<-done
 	}()
@@ -289,7 +208,8 @@ func (cfg *config) crashOne(i int) {
 	}
 	cfg.net.DeleteServer(cfg.ips[i])
 
-	cfg.net.Enable(cfg.ips[i]+"-"+zoo, false)
+	cfg.net.Enable(cfg.ips[i]+"-"+zooAddress, false)
+	cfg.net.Enable(cfg.ips[i]+"-"+masterAddress, false)
 
 	// 避免crash的节点继续更新Persister的值
 	if cfg.saved[i] != nil {
@@ -304,44 +224,46 @@ func (cfg *config) crashOne(i int) {
 
 func makeZKClient(net *rpc.Network, address string) (izk.ZKClient, error) {
 	clients := rpc.MakeFakeClients(net, address)
-	client, err := clients.MakeClient(zoo)
+	client, err := clients.MakeClient(zooAddress)
 	if err != nil {
 		return nil, err
 	}
 
-	return izk.MakeFakeZKClient(client, []string{zoo}, sessionTimeout), nil
+	return izk.MakeFakeZKClient(client, []string{zooAddress}, sessionTimeout), nil
 }
 
-func (cfg *config) makeClient() *clerk {
+func (cfg *config) makeClient() *client.Client {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
 	clientAddress := randstring(16)
 	rpcClients := rpc.MakeFakeClients(cfg.net, clientAddress)
-	clients := make([]rpc.Client, len(cfg.chunkServers))
 	for j := 0; j < len(cfg.chunkServers); j++ {
 		cfg.net.MakeEnd(fmt.Sprintf("%s-%s:%d", clientAddress, cfg.ips[j], common.ChunkPort))
 		cfg.net.Connect(fmt.Sprintf("%s-%s:%d", clientAddress, cfg.ips[j], common.ChunkPort), cfg.ips[j])
 		cfg.net.Enable(fmt.Sprintf("%s-%s:%d", clientAddress, cfg.ips[j], common.ChunkPort), true)
+	}
+	cfg.net.MakeEnd(clientAddress + "-" + masterAddress)
+	cfg.net.Connect(clientAddress+"-"+masterAddress, masterAddress)
+	cfg.net.Enable(clientAddress+"-"+masterAddress, true)
 
-		client, err := rpcClients.MakeClient(fmt.Sprintf("%s:%d", cfg.ips[j], common.ChunkPort))
-		if err != nil {
-			cfg.t.Fatal(err)
-		}
-		clients[j] = client
+	masterClient, err := rpcClients.MakeClient(masterAddress)
+	if err != nil {
+		cfg.t.Fatal(err)
 	}
 
-	ck := makeClerk(clients)
-	cfg.clerks[ck] = clientAddress
+	cl := client.MakeClient(masterClient, rpcClients)
+	cfg.clients[cl] = clientAddress
 
-	return ck
+	return cl
 }
 
-func (cfg *config) deleteClient(ck *clerk) {
+func (cfg *config) deleteClient(cl *client.Client) {
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
-	delete(cfg.clerks, ck)
+	delete(cfg.clients, cl)
+	cl.Close()
 }
 
 func (cfg *config) begin(description string) {

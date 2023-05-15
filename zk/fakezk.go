@@ -37,6 +37,13 @@ var errMap = map[err]error{
 
 type err string
 
+func randstring(n int) string {
+	b := make([]byte, 2*n)
+	rand.Read(b)
+	s := base64.URLEncoding.EncodeToString(b)
+	return s[0:n]
+}
+
 type FakeZKConn struct {
 	mu             sync.Mutex
 	client         rpc.Client
@@ -656,7 +663,7 @@ func (zn *znode) Delete(parents []string, paths []string, version int32) err {
 	return success
 }
 
-func (zn *znode) Exists(parents []string, paths []string, watch bool, connName string) (bool, int32, string) {
+func (zn *znode) Exists(parents []string, paths []string, watch bool, connName string) (bool, int32, string, err) {
 	if len(paths) > 0 {
 		zn.mu.RLock()
 		defer zn.mu.RUnlock()
@@ -673,7 +680,7 @@ func (zn *znode) Exists(parents []string, paths []string, watch bool, connName s
 				}
 				zn.ws.addUntriggered(watcher)
 			}
-			return false, 0, watcherName
+			return false, 0, watcherName, success
 		}
 		return child.Exists(append(parents, paths[0]), paths[1:], watch, connName)
 	}
@@ -692,7 +699,7 @@ func (zn *znode) Exists(parents []string, paths []string, watch bool, connName s
 		zn.ws.addUntriggered(watcher)
 	}
 
-	return true, zn.version, watcherName
+	return true, zn.version, watcherName, success
 }
 
 func (zn *znode) Get(parents []string, paths []string, watch bool, connName string) ([]byte, int32, string, err) {
@@ -806,8 +813,12 @@ func (zn *znode) Sync(paths []string) (string, err) {
 
 func (zn *znode) deleteRecursive(parents []string, name string) {
 	child := zn.children[name]
+	children := make([]string, 0)
 	for c := range child.children {
-		zn.deleteRecursive(append(parents, name), c)
+		children = append(children, c)
+	}
+	for _, c := range children {
+		child.deleteRecursive(append(parents, name), c)
 	}
 	delete(zn.children, name)
 
@@ -877,34 +888,6 @@ func MakeFakeZKServer() *FakeZKServer {
 	return fzks
 }
 
-func randstring(n int) string {
-	b := make([]byte, 2*n)
-	rand.Read(b)
-	s := base64.URLEncoding.EncodeToString(b)
-	return s[0:n]
-}
-
-func validatePath(path string, isSequential bool) err {
-	if path == "" {
-		return invalidPath
-	}
-
-	if path[0] != '/' {
-		return invalidPath
-	}
-
-	n := len(path)
-	if n == 1 {
-		return success
-	}
-
-	if !isSequential && path[n-1] == '/' {
-		return invalidPath
-	}
-
-	return success
-}
-
 type CloseArgs struct {
 	ConnName string
 }
@@ -926,20 +909,22 @@ func (fzks *FakeZKServer) close(connName string) ([]string, bool) {
 	return znodes, true
 }
 
-func (fzks *FakeZKServer) Close(args *CloseArgs, reply *CloseReply) {
+func (fzks *FakeZKServer) Close(args *CloseArgs, reply *CloseReply) error {
 	fzks.mu.Lock()
 	znodes, ok := fzks.close(args.ConnName)
 	fzks.mu.Unlock()
 
 	if !ok {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	for _, znode := range znodes {
 		fzks.root.deleteEphemeral([]string{}, strings.Split(znode[1:], "/"), args.ConnName)
 	}
 	reply.Err = success
+
+	return nil
 }
 
 type CreateArgs struct {
@@ -975,25 +960,42 @@ func (fzks *FakeZKServer) RefreshConn(connName string) bool {
 	return true
 }
 
-func (fzks *FakeZKServer) Create(args *CreateArgs, reply *CreateReply) {
+func validatePath(path string, isSequential bool) err {
+	if path == "" {
+		return invalidPath
+	}
+
+	if path[0] != '/' {
+		return invalidPath
+	}
+
+	n := len(path)
+	if n == 1 {
+		return success
+	}
+
+	if !isSequential && path[n-1] == '/' {
+		return invalidPath
+	}
+
+	return success
+}
+
+func (fzks *FakeZKServer) Create(args *CreateArgs, reply *CreateReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, args.Flags&zk.FlagSequence == zk.FlagSequence); err != success {
 		reply.Err = err
-		return
-	}
-	paths := strings.Split(args.Path[1:], "/")
-	name, err := fzks.root.Create(args.ConnName, []string{}, paths, args.Data, args.Flags)
-	if err != success {
-		reply.Err = err
-		return
+		return nil
 	}
 
-	reply.Name = name
-	reply.Err = success
+	paths := strings.Split(args.Path[1:], "/")
+	reply.Name, reply.Err = fzks.root.Create(args.ConnName, []string{}, paths, args.Data, args.Flags)
+
+	return nil
 }
 
 type DeleteArgs struct {
@@ -1006,20 +1008,21 @@ type DeleteReply struct {
 	Err err
 }
 
-func (fzks *FakeZKServer) Delete(args *DeleteArgs, reply *DeleteReply) {
+func (fzks *FakeZKServer) Delete(args *DeleteArgs, reply *DeleteReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, false); err != success {
 		reply.Err = err
-		return
+		return nil
 	}
-	paths := strings.Split(args.Path[1:], "/")
-	err := fzks.root.Delete([]string{}, paths, args.Version)
 
-	reply.Err = err
+	paths := strings.Split(args.Path[1:], "/")
+	reply.Err = fzks.root.Delete([]string{}, paths, args.Version)
+
+	return nil
 }
 
 type ExistsArgs struct {
@@ -1035,23 +1038,21 @@ type ExistsReply struct {
 	Err         err
 }
 
-func (fzks *FakeZKServer) Exists(args *ExistsArgs, reply *ExistsReply) {
+func (fzks *FakeZKServer) Exists(args *ExistsArgs, reply *ExistsReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, false); err != success {
 		reply.Err = err
-		return
+		return nil
 	}
-	paths := strings.Split(args.Path[1:], "/")
-	ok, version, watcherName := fzks.root.Exists([]string{}, paths, args.Watch, args.ConnName)
 
-	reply.OK = ok
-	reply.Version = version
-	reply.WatcherName = watcherName
-	reply.Err = success
+	paths := strings.Split(args.Path[1:], "/")
+	reply.OK, reply.Version, reply.WatcherName, reply.Err = fzks.root.Exists([]string{}, paths, args.Watch, args.ConnName)
+
+	return nil
 }
 
 type GetArgs struct {
@@ -1067,23 +1068,21 @@ type GetReply struct {
 	Err         err
 }
 
-func (fzks *FakeZKServer) Get(args *GetArgs, reply *GetReply) {
+func (fzks *FakeZKServer) Get(args *GetArgs, reply *GetReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, false); err != success {
 		reply.Err = err
-		return
+		return nil
 	}
-	paths := strings.Split(args.Path[1:], "/")
-	data, version, watcherName, err := fzks.root.Get([]string{}, paths, args.Watch, args.ConnName)
 
-	reply.Data = data
-	reply.Version = version
-	reply.WatcherName = watcherName
-	reply.Err = err
+	paths := strings.Split(args.Path[1:], "/")
+	reply.Data, reply.Version, reply.WatcherName, reply.Err = fzks.root.Get([]string{}, paths, args.Watch, args.ConnName)
+
+	return nil
 }
 
 type SetArgs struct {
@@ -1098,21 +1097,21 @@ type SetReply struct {
 	Err     err
 }
 
-func (fzks *FakeZKServer) Set(args *SetArgs, reply *SetReply) {
+func (fzks *FakeZKServer) Set(args *SetArgs, reply *SetReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, false); err != success {
 		reply.Err = err
-		return
+		return nil
 	}
-	paths := strings.Split(args.Path[1:], "/")
-	version, err := fzks.root.Set([]string{}, paths, args.Data, args.Version)
 
-	reply.Version = version
-	reply.Err = err
+	paths := strings.Split(args.Path[1:], "/")
+	reply.Version, reply.Err = fzks.root.Set([]string{}, paths, args.Data, args.Version)
+
+	return nil
 }
 
 type ChildrenArgs struct {
@@ -1128,23 +1127,25 @@ type ChildrenReply struct {
 	Err         err
 }
 
-func (fzks *FakeZKServer) Children(args *ChildrenArgs, reply *ChildrenReply) {
+func (fzks *FakeZKServer) Children(args *ChildrenArgs, reply *ChildrenReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
-	if err := validatePath(args.Path, false); err != success {
-		reply.Err = err
-		return
-	}
-	paths := strings.Split(args.Path[1:], "/")
-	children, version, watcherName, err := fzks.root.Children([]string{}, paths, args.Watch, args.ConnName)
+	if args.Path == "/" {
+		reply.Children, reply.Version, reply.WatcherName, reply.Err = fzks.root.Children([]string{}, []string{}, args.Watch, args.ConnName)
+	} else {
+		if err := validatePath(args.Path, false); err != success {
+			reply.Err = err
+			return nil
+		}
 
-	reply.Children = children
-	reply.Version = version
-	reply.WatcherName = watcherName
-	reply.Err = err
+		paths := strings.Split(args.Path[1:], "/")
+		reply.Children, reply.Version, reply.WatcherName, reply.Err = fzks.root.Children([]string{}, paths, args.Watch, args.ConnName)
+	}
+
+	return nil
 }
 
 type SyncArgs struct {
@@ -1157,21 +1158,21 @@ type SyncReply struct {
 	Err  err
 }
 
-func (fzks *FakeZKServer) Sync(args *SyncArgs, reply *SyncReply) {
+func (fzks *FakeZKServer) Sync(args *SyncArgs, reply *SyncReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	if err := validatePath(args.Path, false); err != success {
 		reply.Err = err
-		return
+		return nil
 	}
-	paths := strings.Split(args.Path[1:], "/")
-	path, err := fzks.root.Sync(paths)
 
-	reply.Path = path
-	reply.Err = err
+	paths := strings.Split(args.Path[1:], "/")
+	reply.Path, reply.Err = fzks.root.Sync(paths)
+
+	return nil
 }
 
 type SendHeartBeatArgs struct {
@@ -1184,10 +1185,10 @@ type SendHeartBeatReply struct {
 	Err          err
 }
 
-func (fzks *FakeZKServer) SendHeartBeat(args *SendHeartBeatArgs, reply *SendHeartBeatReply) {
+func (fzks *FakeZKServer) SendHeartBeat(args *SendHeartBeatArgs, reply *SendHeartBeatReply) error {
 	if !fzks.RefreshConn(args.ConnName) {
 		reply.Err = connectionClosed
-		return
+		return nil
 	}
 
 	fzks.mu.Lock()
@@ -1205,6 +1206,8 @@ func (fzks *FakeZKServer) SendHeartBeat(args *SendHeartBeatArgs, reply *SendHear
 
 	reply.WatcherNames = watcherNames
 	reply.Err = success
+
+	return nil
 }
 
 type ConnectArgs struct {
@@ -1217,7 +1220,7 @@ type ConnectReply struct {
 	Err      err
 }
 
-func (fzks *FakeZKServer) Connect(args *ConnectArgs, reply *ConnectReply) {
+func (fzks *FakeZKServer) Connect(args *ConnectArgs, reply *ConnectReply) error {
 	fzks.mu.Lock()
 	defer fzks.mu.Unlock()
 
@@ -1227,6 +1230,8 @@ func (fzks *FakeZKServer) Connect(args *ConnectArgs, reply *ConnectReply) {
 
 	reply.ConnName = connName
 	reply.Err = success
+
+	return nil
 }
 
 func (fzks *FakeZKServer) Kill() {

@@ -22,50 +22,57 @@ type JunkServer struct {
 	log2 []int
 }
 
-func (js *JunkServer) Handler1(args string, reply *int) {
+func (js *JunkServer) Handler1(args string, reply *int) error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	js.log1 = append(js.log1, args)
 	*reply, _ = strconv.Atoi(args)
+	return nil
 }
 
-func (js *JunkServer) Handler2(args int, reply *string) {
+func (js *JunkServer) Handler2(args int, reply *string) error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	js.log2 = append(js.log2, args)
 	*reply = "handler2-" + strconv.Itoa(args)
+	return nil
 }
 
-func (js *JunkServer) Handler3(args int, reply *int) {
+func (js *JunkServer) Handler3(args int, reply *int) error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	time.Sleep(20 * time.Second)
 	*reply = -args
+	return nil
 }
 
 // args是指针
-func (js *JunkServer) Handler4(args *JunkArgs, reply *JunkReply) {
+func (js *JunkServer) Handler4(args *JunkArgs, reply *JunkReply) error {
 	reply.X = "pointer"
+	return nil
 }
 
 // args不是指针
-func (js *JunkServer) Handler5(args JunkArgs, reply *JunkReply) {
+func (js *JunkServer) Handler5(args JunkArgs, reply *JunkReply) error {
 	reply.X = "no pointer"
+	return nil
 }
 
-func (js *JunkServer) Handler6(args string, reply *int) {
+func (js *JunkServer) Handler6(args string, reply *int) error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	*reply = len(args)
+	return nil
 }
 
-func (js *JunkServer) Handler7(args int, reply *string) {
+func (js *JunkServer) Handler7(args int, reply *string) error {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	*reply = ""
 	for i := 0; i < args; i++ {
 		*reply = *reply + "y"
 	}
+	return nil
 }
 
 // 简单测试

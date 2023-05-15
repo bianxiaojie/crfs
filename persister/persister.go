@@ -17,9 +17,9 @@ type Persister interface {
 	NodeStateSize() int
 	SaveStateAndSnapshot(state []byte)
 	RestoreSnapshot()
-
 	WriteChunk(chunkName string, offset int, data []byte) Err
 	AppendChunk(chunkName string, data []byte) (int, Err)
 	ReadChunk(chunkName string, offset int, size int) ([]byte, Err)
-	DeleteChunk(chunkName string) Err
+	DeleteChunk(chunkName string)
+	ChunkNames() []string
 }

@@ -6,5 +6,5 @@ type Client interface {
 }
 
 type Clients interface {
-	MakeClient(me string) (Client, error)
+	MakeClient(address string) (Client, error)
 }

@@ -2,14 +2,16 @@ package chunkserver
 
 import (
 	"container/list"
+	"crfs/common"
+	"crfs/master"
 	"crfs/node"
 	"crfs/persister"
 	"crfs/rpc"
 	izk "crfs/zk"
 	"encoding/gob"
+	"fmt"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -40,27 +42,31 @@ type Result struct {
 }
 
 type ChunkServer struct {
-	mu        sync.Mutex
-	address   string
-	applyCh   <-chan node.ApplyMsg
-	node      *node.Node
-	persister persister.Persister
-	dead      int32
+	mu           sync.Mutex
+	masterClient rpc.Client
+	address      string
+	applyCh      <-chan node.ApplyMsg
+	Node         *node.Node
+	persister    persister.Persister
+	done         chan bool
+	dead         bool
 
 	lastApplied int
 	processList map[string]*list.List
 	resultMap   map[int64]Result
 }
 
-func MakeChunkServer(zkClient izk.ZKClient, zkConn izk.ZKConn, clients rpc.Clients, chainPath string, prefix string, ip string, commitPath string, persister persister.Persister) *ChunkServer {
+func MakeChunkServer(masterClient rpc.Client, zkClient izk.ZKClient, clients rpc.Clients, ip string, chainPath string, commitPath string, cleanupInterval time.Duration, persister persister.Persister, done chan bool) *ChunkServer {
 	gob.Register(Op{})
 
 	cs := &ChunkServer{}
 
-	cs.address = ip + ":7999"
+	cs.masterClient = masterClient
+	cs.address = fmt.Sprintf("%s:%d", ip, common.ChunkPort)
 	applyCh := make(chan node.ApplyMsg)
 	cs.applyCh = applyCh
 	cs.persister = persister
+	cs.done = done
 
 	cs.lastApplied = -1
 	cs.processList = make(map[string]*list.List)
@@ -68,10 +74,13 @@ func MakeChunkServer(zkClient izk.ZKClient, zkConn izk.ZKConn, clients rpc.Clien
 
 	cs.persister.RestoreSnapshot()
 
-	node := node.MakeNode(zkClient, zkConn, clients, chainPath, prefix, ip+":8999", commitPath, persister, applyCh)
-	cs.node = node
+	node := node.MakeNode(zkClient, clients, fmt.Sprintf("%s:%d", ip, common.NodePort), chainPath, commitPath, persister, applyCh)
+	cs.Node = node
 
 	go cs.kickOffApply()
+	if masterClient != nil {
+		go cs.kickOffCleanup(cleanupInterval)
+	}
 
 	return cs
 }
@@ -88,18 +97,18 @@ type WriteReply struct {
 	Err persister.Err
 }
 
-func (cs *ChunkServer) Write(args *WriteArgs, reply *WriteReply) {
+func (cs *ChunkServer) Write(args *WriteArgs, reply *WriteReply) error {
 	DPrintf("[server %s] receives write from %d, chunkName: %s, offset: %d, size: %d, requestId: %d\n",
 		cs.address, args.ClerkId, args.ChunkName, args.Offset, len(args.Data), args.RequestId)
 
 	// 如果超出chunk的范围,则返回
 	if args.Offset < 0 || args.Offset+len(args.Data) > persister.MaxChunkSize {
 		reply.Err = persister.OutOfChunk
-		return
+		return nil
 	}
 	if len(args.Data) == 0 {
 		reply.Err = persister.Success
-		return
+		return nil
 	}
 
 	// 1.检查resultMap[ClerkId]返回结果中的RequestId是否等于Write操作的RequestId
@@ -107,12 +116,12 @@ func (cs *ChunkServer) Write(args *WriteArgs, reply *WriteReply) {
 	if result, ok := cs.resultMap[args.ClerkId]; ok && result.RequestId == args.RequestId {
 		reply.Err = result.Err
 		cs.mu.Unlock()
-		return
+		return nil
 	}
 	cs.mu.Unlock()
 
 	// 2.开始一致性协议
-	_, ok := cs.node.Start(Op{
+	_, ok := cs.Node.Start(Op{
 		Type:      "Write",
 		ChunkName: args.ChunkName,
 		Offset:    args.Offset,
@@ -123,19 +132,19 @@ func (cs *ChunkServer) Write(args *WriteArgs, reply *WriteReply) {
 	// 3.如果Start返回false,则直接返回persister.WrongHead错误,表明该服务器不是头节点,不能开始一致性协议
 	if !ok {
 		reply.Err = persister.WrongHead
-		return
+		return nil
 	}
 
 	for {
 		if cs.Killed() {
 			cs.Kill()
 			reply.Err = persister.Crash
-			return
+			return nil
 		}
 
-		if !cs.node.IsHead() {
+		if !cs.Node.IsHead() {
 			reply.Err = persister.WrongHead
-			return
+			return nil
 		}
 
 		// 4.检查resultMap[ClerkId]返回结果中的RequestId是否等于Write操作的RequestId
@@ -143,7 +152,7 @@ func (cs *ChunkServer) Write(args *WriteArgs, reply *WriteReply) {
 		if result, ok := cs.resultMap[args.ClerkId]; ok && result.RequestId == args.RequestId {
 			reply.Err = result.Err
 			cs.mu.Unlock()
-			return
+			return nil
 		}
 		cs.mu.Unlock()
 
@@ -163,13 +172,13 @@ type AppendReply struct {
 	Err    persister.Err
 }
 
-func (cs *ChunkServer) Append(args *AppendArgs, reply *AppendReply) {
+func (cs *ChunkServer) Append(args *AppendArgs, reply *AppendReply) error {
 	DPrintf("[server %s] receives append from %d, chunkName: %s, size: %d, requestId: %d\n",
 		cs.address, args.ClerkId, args.ChunkName, len(args.Data), args.RequestId)
 
 	if len(args.Data) == 0 {
 		reply.Err = persister.Success
-		return
+		return nil
 	}
 
 	// 1.检查resultMap[ClerkId]返回结果中的RequestId是否等于Append操作的RequestId
@@ -178,12 +187,12 @@ func (cs *ChunkServer) Append(args *AppendArgs, reply *AppendReply) {
 		reply.Offset = result.Offset
 		reply.Err = result.Err
 		cs.mu.Unlock()
-		return
+		return nil
 	}
 	cs.mu.Unlock()
 
 	// 2.开始一致性协议
-	_, ok := cs.node.Start(Op{
+	_, ok := cs.Node.Start(Op{
 		Type:      "Append",
 		ChunkName: args.ChunkName,
 		Data:      args.Data,
@@ -193,19 +202,19 @@ func (cs *ChunkServer) Append(args *AppendArgs, reply *AppendReply) {
 	// 3.如果Start返回false,则直接返回persister.WrongHead错误,表明该服务器不是头节点,不能开始一致性协议
 	if !ok {
 		reply.Err = persister.WrongHead
-		return
+		return nil
 	}
 
 	for {
 		if cs.Killed() {
 			cs.Kill()
 			reply.Err = persister.Crash
-			return
+			return nil
 		}
 
-		if !cs.node.IsHead() {
+		if !cs.Node.IsHead() {
 			reply.Err = persister.WrongHead
-			return
+			return nil
 		}
 
 		// 4.检查resultMap[ClerkId]返回结果中的RequestId是否等于Write操作的RequestId
@@ -214,7 +223,7 @@ func (cs *ChunkServer) Append(args *AppendArgs, reply *AppendReply) {
 			reply.Offset = result.Offset
 			reply.Err = result.Err
 			cs.mu.Unlock()
-			return
+			return nil
 		}
 		cs.mu.Unlock()
 
@@ -235,18 +244,18 @@ type ReadReply struct {
 	Err  persister.Err
 }
 
-func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
+func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) error {
 	DPrintf("[server %s] receives read from %d, chunkName: %s, offset: %d, size: %d, requestId: %d\n",
 		cs.address, args.ClerkId, args.ChunkName, args.Offset, args.Size, args.RequestId)
 
 	if args.Offset < 0 || args.Size < 0 || args.Offset+args.Size > persister.MaxChunkSize {
 		reply.Err = persister.OutOfChunk
-		return
+		return nil
 	}
 	if args.Size == 0 {
 		reply.Data = make([]byte, 0)
 		reply.Err = persister.Success
-		return
+		return nil
 	}
 
 	// 1.检查resultMap[ClerkId]返回结果中的RequestId是否等于Get操作的RequestId
@@ -255,7 +264,7 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 		reply.Data = result.Data
 		reply.Err = result.Err
 		cs.mu.Unlock()
-		return
+		return nil
 	}
 	cs.mu.Unlock()
 
@@ -264,17 +273,12 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 		if cs.Killed() {
 			cs.Kill()
 			reply.Err = persister.Crash
-			return
+			return nil
 		}
 
 		// 2.调用node.LastCommittedIndex获取当前zookeeper提交的日志索引,获取成功后赋值给lastCommittedIndex
-		args := node.LastCommittedIndexArgs{}
-		var reply node.LastCommittedIndexReply
-
-		cs.node.LastCommittedIndex(&args, &reply)
-
-		if reply.Success {
-			lastCommittedIndex = reply.CommittedIndex
+		if committedIndex, ok := cs.Node.LastCommittedIndex(); ok {
+			lastCommittedIndex = committedIndex
 			break
 		}
 
@@ -285,7 +289,7 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 		if cs.Killed() {
 			cs.Kill()
 			reply.Err = persister.Crash
-			return
+			return nil
 		}
 
 		// 3.如果cs.lastApplied >= lastCommittedIndex,将Read操作添加到相应chunk的任务队列的末尾
@@ -318,7 +322,7 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 		if cs.Killed() {
 			cs.Kill()
 			reply.Err = persister.Crash
-			return
+			return nil
 		}
 
 		// 4.不断检查resultMap[ClerkId]返回结果中的RequestId是否等于Get操作的RequestId,如果等于,表明执行器执行完该请求,将该结果返回给客户端
@@ -327,7 +331,7 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 			reply.Data = result.Data
 			reply.Err = result.Err
 			cs.mu.Unlock()
-			return
+			return nil
 		}
 		cs.mu.Unlock()
 
@@ -335,9 +339,9 @@ func (cs *ChunkServer) Read(args *ReadArgs, reply *ReadReply) {
 	}
 }
 
-func (cs *ChunkServer) delete(chunkName string) persister.Err {
+func (cs *ChunkServer) Delete(chunkName string) persister.Err {
 	// 1.将delete操作封装成Op对象，调用node.Start(op)开始一致性协议。
-	index, ok := cs.node.Start(Op{
+	index, ok := cs.Node.Start(Op{
 		Type:      "Delete",
 		ChunkName: chunkName,
 	})
@@ -427,7 +431,7 @@ func (cs *ChunkServer) apply(chunkName string) {
 			}
 			cs.mu.Unlock()
 		case "Delete":
-			DPrintf("[server %s] apply delete: %v\n", cs.address, op)
+			DPrintf("[server %s] applies delete: %v\n", cs.address, op)
 			cs.persister.DeleteChunk(op.ChunkName)
 		default:
 			log.Fatalf("未知的操作类型: %s\n", op.Type)
@@ -445,7 +449,7 @@ func (cs *ChunkServer) kickOffApply() {
 		applyMsg := <-cs.applyCh
 		op := applyMsg.Command.(Op)
 
-		DPrintf("[server %s] receives applyMsg: %v\n", cs.address, applyMsg)
+		DPrintf("[server %s] receives applyMsg: %v from node\n", cs.address, applyMsg)
 
 		cs.mu.Lock()
 		if result, ok := cs.resultMap[op.ClerkId]; !ok || result.RequestId < op.RequestId {
@@ -467,12 +471,56 @@ func (cs *ChunkServer) kickOffApply() {
 	}
 }
 
-func (cs *ChunkServer) Kill() {
-	atomic.StoreInt32(&cs.dead, 1)
+func (cs *ChunkServer) kickOffCleanup(cleanupInterval time.Duration) {
+	for {
+		time.Sleep(cleanupInterval)
 
-	cs.node.Kill()
+		if cs.Killed() {
+			cs.Kill()
+			return
+		}
+
+		chunkNames := cs.persister.ChunkNames()
+		var rubbishChunksReply master.RubbishChunksReply
+		for {
+			args := master.RubbishChunksArgs{
+				ChunkNames: chunkNames,
+			}
+			var reply master.RubbishChunksReply
+
+			if cs.masterClient.Call("Master.RubbishChunks", &args, &reply) {
+				rubbishChunksReply = reply
+				break
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		for _, rubbishChunkName := range rubbishChunksReply.RubbishChunkNames {
+			cs.Delete(rubbishChunkName)
+		}
+	}
+}
+
+func (cs *ChunkServer) Kill() {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if cs.dead {
+		return
+	}
+
+	cs.Node.Kill()
+
+	cs.dead = true
+	go func() {
+		cs.done <- true
+	}()
 }
 
 func (cs *ChunkServer) Killed() bool {
-	return atomic.LoadInt32(&cs.dead) == 1 || cs.node.Killed()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	return cs.dead || cs.Node.Killed()
 }

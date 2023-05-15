@@ -1,8 +1,9 @@
-package chunkserver
+package test
 
 import (
 	"bytes"
-	"crfs/persister"
+	"crfs/client"
+	"crfs/master"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -42,21 +43,36 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 		clientUpdates[i] = make(chan interface{})
 	}
 	for i := 0; i < 3; i++ {
+		cl := cfg.makeClient()
+
 		atomic.StoreInt32(&clientsDone, 0)
-		spawnClientsAndWait(t, cfg, nclients, func(cli int, ck *clerk, t *testing.T) {
+		spawnClientsAndWait(t, cfg, nclients, func(cli int, cl *client.Client, t *testing.T) {
 			var v interface{}
 			defer func() {
 				clientUpdates[cli] <- v
 			}()
 
-			chunkName := strconv.Itoa(cli)
+			file := fmt.Sprintf("/%d", cli)
+			for {
+				err := cl.Create(file, true)
+				if err == master.Success || err == master.FileExists {
+					break
+				}
+				if err != master.ErrConnection {
+					v = err
+					return
+				}
+
+				time.Sleep(100 * time.Millisecond)
+			}
+
 			last := make([]byte, 0)
 			for atomic.LoadInt32(&clientsDone) == 0 {
 				if r := rand.Int() % 1000; r < 700 {
 					offset := rand.Intn(len(last) + 1)
 					data := []byte(randstring(16))
-					err := Write(cfg, ck, chunkName, offset, data)
-					if err != persister.Success {
+					err := Write(cfg, cl, file, offset, data)
+					if err != master.Success {
 						v = err
 						return
 					}
@@ -68,24 +84,24 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 					last = append(append(front, data...), end...)
 				} else if r >= 300 && r < 700 {
 					data := []byte(randstring(16))
-					offset, err := Append(cfg, ck, chunkName, data)
-					if err != persister.Success {
+					offset, err := Append(cfg, cl, file, data)
+					if err != master.Success {
 						v = err
 						return
 					}
 					if len(last) != offset {
-						v = fmt.Errorf("Append不一致, chunk name: %s, 预期的offset: %d, 实际的offset: %d\n", chunkName, len(last), offset)
+						v = fmt.Errorf("Append不一致, file name: %s, 预期的offset: %d, 实际的offset: %d\n", file, len(last), offset)
 						return
 					}
 					last = append(last, data...)
 				} else {
-					data, err := Read(cfg, ck, chunkName, 0, len(last))
-					if err != persister.Success {
+					data, err := Read(cfg, cl, file, 0, len(last))
+					if err != master.Success {
 						v = err
 						return
 					}
 					if !bytes.Equal(last, data) {
-						v = fmt.Errorf("读取不一致, chunk name: %s, 预期的数据:\n%v\n, 实际的数据:\n%v\n", chunkName, last, data)
+						v = fmt.Errorf("读取不一致, file name: %s, 预期的数据:\n%v\n, 实际的数据:\n%v\n", file, last, data)
 						return
 					}
 				}
@@ -116,51 +132,67 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 		})
 
 		for i := 0; i < nclients; i++ {
-			chunkName := strconv.Itoa(i)
-			for j := 0; ; {
-				if cfg.chunkServers[j].Delete(chunkName) == persister.Success {
+			file := fmt.Sprintf("/%d", i)
+			for {
+				err := cl.Delete(file, true)
+				if err == master.Success || err == master.FileNotExists {
 					break
 				}
-				j = (j + 1) % len(cfg.chunkServers)
+				if err != master.ErrConnection {
+					t.Fatal(err)
+				}
 
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
 
 		atomic.StoreInt32(&clientsDone, 0)
-		spawnClientsAndWait(t, cfg, nclients, func(cli int, ck *clerk, t *testing.T) {
+		spawnClientsAndWait(t, cfg, nclients, func(cli int, cl *client.Client, t *testing.T) {
 			var v interface{}
 			defer func() {
 				clientUpdates[cli] <- v
 			}()
 
-			chunkName := strconv.Itoa(cli)
+			file := fmt.Sprintf("/%d", cli)
+			for {
+				err := cl.Create(file, true)
+				if err == master.Success || err == master.FileExists {
+					break
+				}
+				if err != master.ErrConnection {
+					v = err
+					return
+				}
+
+				time.Sleep(100 * time.Millisecond)
+			}
+
 			lastString := ""
 			count := 0
 			size := 0
 			for atomic.LoadInt32(&clientsDone) == 0 {
 				if rand.Int()%1000 < 640 {
 					data := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(count) + " y"
-					offset, err := Append(cfg, ck, chunkName, []byte(data))
-					if err != persister.Success {
+					offset, err := Append(cfg, cl, file, []byte(data))
+					if err != master.Success {
 						v = err
 						return
 					}
 					if size != offset {
-						v = fmt.Errorf("Append不一致, chunk name: %s, 预期的offset: %d, 实际的offset: %d\n", chunkName, size, offset)
+						v = fmt.Errorf("Append不一致, file name: %s, 预期的offset: %d, 实际的offset: %d\n", file, size, offset)
 						return
 					}
 					lastString = lastString + data
 					count++
 					size += len(string(data))
 				} else {
-					data, err := Read(cfg, ck, chunkName, 0, len([]byte(lastString)))
-					if err != persister.Success {
+					data, err := Read(cfg, cl, file, 0, len([]byte(lastString)))
+					if err != master.Success {
 						v = err
 						return
 					}
 					if lastString != string(data) {
-						v = fmt.Errorf("读取不一致, chunk name: %s, 预期的数据:\n%s\n, 实际的数据:\n%s\n", chunkName, lastString, string(data))
+						v = fmt.Errorf("读取不一致, file name: %s, 预期的数据:\n%s\n, 实际的数据:\n%s\n", file, lastString, string(data))
 						return
 					}
 				}
@@ -170,13 +202,13 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 			time.Sleep(sessionTimeout)
 			atomic.StoreInt32(&clientsDone, 1)
 
-			ck := cfg.makeClient()
+			cl := cfg.makeClient()
 			for i := 0; i < nclients; i++ {
 				v := <-clientUpdates[i]
 				if u, ok := v.(update); ok {
-					chunkName := strconv.Itoa(i)
-					data, err := Read(cfg, ck, chunkName, 0, u.size)
-					if err != persister.Success {
+					file := fmt.Sprintf("/%d", i)
+					data, err := Read(cfg, cl, file, 0, u.size)
+					if err != master.Success {
 						t.Fatal(err)
 					}
 					checkClntAppends(t, i, string(data), u.count)
@@ -184,7 +216,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 					t.Fatal(v)
 				}
 			}
-			cfg.deleteClient(ck)
+			cfg.deleteClient(cl)
 
 			if crash {
 				for i := 0; i < nservers; i++ {
@@ -202,32 +234,37 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, crash bool) {
 		})
 
 		for i := 0; i < nclients; i++ {
-			chunkName := strconv.Itoa(i)
-			for j := 0; ; {
-				if cfg.chunkServers[j].Delete(chunkName) == persister.Success {
+			file := fmt.Sprintf("/%d", i)
+			for {
+				err := cl.Delete(file, true)
+				if err == master.Success || err == master.FileNotExists {
 					break
 				}
-				j = (j + 1) % len(cfg.chunkServers)
+				if err != master.ErrConnection {
+					t.Fatal(err)
+				}
 
 				time.Sleep(100 * time.Millisecond)
 			}
 		}
+
+		cl.Close()
 	}
 
 	cfg.end()
 }
 
-func spawnClientsAndWait(t *testing.T, cfg *config, ncli int, fn func(me int, ck *clerk, t *testing.T), beforeWaitCallback func()) {
+func spawnClientsAndWait(t *testing.T, cfg *config, ncli int, fn func(me int, cl *client.Client, t *testing.T), beforeWaitCallback func()) {
 	ca := make([]chan bool, ncli)
 	for cli := 0; cli < ncli; cli++ {
 		ca[cli] = make(chan bool)
-		go func(t *testing.T, cfg *config, me int, ca chan bool, fn func(me int, ck *clerk, t *testing.T)) {
+		go func(t *testing.T, cfg *config, me int, ca chan bool, fn func(me int, cl *client.Client, t *testing.T)) {
 			ok := false
 			defer func() { ca <- ok }()
-			ck := cfg.makeClient()
-			fn(me, ck, t)
+			cl := cfg.makeClient()
+			fn(me, cl, t)
 			ok = true
-			cfg.deleteClient(ck)
+			cfg.deleteClient(cl)
 		}(t, cfg, cli, ca[cli], fn)
 	}
 	beforeWaitCallback()
@@ -239,20 +276,20 @@ func spawnClientsAndWait(t *testing.T, cfg *config, ncli int, fn func(me int, ck
 	}
 }
 
-func Write(cfg *config, ck *clerk, chunkName string, offset int, data []byte) persister.Err {
-	err := ck.write(chunkName, offset, data)
+func Write(cfg *config, cl *client.Client, file string, offset int, data []byte) master.FileOperationErr {
+	err := cl.Write(file, offset, data)
 	cfg.op()
 	return err
 }
 
-func Append(cfg *config, ck *clerk, chunkName string, data []byte) (int, persister.Err) {
-	offset, err := ck.append(chunkName, data)
+func Append(cfg *config, cl *client.Client, file string, data []byte) (int, master.FileOperationErr) {
+	offset, err := cl.Append(file, data)
 	cfg.op()
 	return offset, err
 }
 
-func Read(cfg *config, ck *clerk, chunkName string, offset int, size int) ([]byte, persister.Err) {
-	data, err := ck.read(chunkName, offset, size)
+func Read(cfg *config, cl *client.Client, file string, offset int, size int) ([]byte, master.FileOperationErr) {
+	data, err := cl.Read(file, offset, size)
 	cfg.op()
 	return data, err
 }
@@ -315,19 +352,31 @@ func TestUnreliableOneChunk(t *testing.T) {
 	cfg := makeConfig(t, nservers, true)
 	defer cfg.cleanup()
 
-	ck := cfg.makeClient()
+	cfg.begin("Test: concurrent append to same file, unreliable")
 
-	cfg.begin("Test: concurrent append to same chunk, unreliable")
+	cl := cfg.makeClient()
+	file := "/k"
+	for {
+		err := cl.Create(file, true)
+		if err == master.Success || err == master.FileExists {
+			break
+		}
+		if err != master.ErrConnection {
+			t.Fatal(err)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	const nclient = 10
 	const count = 10
 	var size int64
-	spawnClientsAndWait(t, cfg, nclient, func(me int, ck *clerk, t *testing.T) {
+	spawnClientsAndWait(t, cfg, nclient, func(me int, cl *client.Client, t *testing.T) {
 		n := 0
 		for n < count {
 			data := []byte("x " + strconv.Itoa(me) + " " + strconv.Itoa(n) + " y")
-			_, err := Append(cfg, ck, "k", data)
-			if err != persister.Success {
+			_, err := Append(cfg, cl, file, data)
+			if err != master.Success {
 				t.Fatal(err)
 			}
 			n++
@@ -340,11 +389,23 @@ func TestUnreliableOneChunk(t *testing.T) {
 		counts = append(counts, count)
 	}
 
-	vx, err := Read(cfg, ck, "k", 0, int(size))
-	if err != persister.Success {
+	vx, err := Read(cfg, cl, file, 0, int(size))
+	if err != master.Success {
 		t.Fatal(err)
 	}
 	checkConcurrentAppends(t, string(vx), counts)
+
+	for {
+		err := cl.Delete(file, true)
+		if err == master.Success || err == master.FileNotExists {
+			break
+		}
+		if err != master.ErrConnection {
+			t.Fatal(err)
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	cfg.end()
 }

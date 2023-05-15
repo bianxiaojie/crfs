@@ -1,6 +1,7 @@
 package node
 
 import (
+	izk "crfs/zk"
 	"testing"
 	"time"
 )
@@ -162,7 +163,7 @@ func TestAgreementCrashRestart(t *testing.T) {
 
 	chain = cfg.checkChain(header1, node12)
 	if header1 != chain[0] {
-		cfg.t.Fatalf("中间节点crash不应该改变头节点,头节点应当为: %s, 实际的头节点为: %s\n", cfg.addresses[header1], cfg.addresses[chain[0]])
+		cfg.t.Fatalf("中间节点crash不应该改变头节点,头节点应当为: %s, 实际的头节点为: %s\n", cfg.ips[header1], cfg.ips[chain[0]])
 	}
 
 	for i := 0; i < iters; i++ {
@@ -187,7 +188,7 @@ func TestAgreementCrashRestart(t *testing.T) {
 
 	chain = cfg.checkChain(header2, node21, header1)
 	if header2 != chain[0] {
-		cfg.t.Fatalf("中间节点crash不应该改变头节点,头节点应当为: %s, 实际的头节点为: %s\n", cfg.addresses[header2], cfg.addresses[chain[0]])
+		cfg.t.Fatalf("中间节点crash不应该改变头节点,头节点应当为: %s, 实际的头节点为: %s\n", cfg.ips[header2], cfg.ips[chain[0]])
 	}
 
 	for i := 0; i < iters; i++ {
@@ -218,14 +219,14 @@ func TestAgreementDisconnect(t *testing.T) {
 	}
 
 	if nCommitted, _ := cfg.nCommitted(0, header, node1, node2); nCommitted != 0 {
-		cfg.t.Fatalf("节点%s和尾节点%s网络断开,不应有日志提交,但有%d个节点提交了第一个日志\n", cfg.addresses[node1], cfg.addresses[node2], nCommitted)
+		cfg.t.Fatalf("节点%s和尾节点%s网络断开,不应有日志提交,但有%d个节点提交了第一个日志\n", cfg.ips[node1], cfg.ips[node2], nCommitted)
 	}
 
 	cfg.enable(node1, node2, true)
 	time.Sleep(sessionTimeout)
 
 	if nCommitted, _ := cfg.nCommitted(cmd-1, header, node1, node2); nCommitted != 3 {
-		cfg.t.Fatalf("节点%s和尾节点%s网络恢复,所有节点应当提交所有日志,但只有%d个节点提交了所有日志\n", cfg.addresses[node1], cfg.addresses[node2], nCommitted)
+		cfg.t.Fatalf("节点%s和尾节点%s网络恢复,所有节点应当提交所有日志,但只有%d个节点提交了所有日志\n", cfg.ips[node1], cfg.ips[node2], nCommitted)
 	}
 
 	for i := 0; i < iters; i++ {
@@ -267,6 +268,23 @@ func TestAgreementCommittedNodeCrashed(t *testing.T) {
 	cfg.end()
 }
 
+func makeTestZKConn(cfg *config) izk.ZKConn {
+	n := "config"
+	cfg.net.MakeEnd(n + "-" + zoo)
+	cfg.net.Connect(n+"-"+zoo, zoo)
+	cfg.net.Enable(n+"-"+zoo, true)
+	zkClient, err := makeZKClient(cfg.net, n)
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
+	zkConn, err := makeZKConn(zkClient)
+	if err != nil {
+		cfg.t.Fatal(err)
+	}
+
+	return zkConn
+}
+
 func TestAgreementHeaderParitition(t *testing.T) {
 	nnodes := 3
 	cfg := makeConfig(t, nnodes, false)
@@ -280,16 +298,10 @@ func TestAgreementHeaderParitition(t *testing.T) {
 	header1, node11, node12 := chain[0], chain[1], chain[2]
 
 	cfg.enableZookeeper(header1, false)
-	zkClient, err := makeZKClient(cfg.net, "config")
-	if err != nil {
-		cfg.t.Fatal(err)
-	}
-	zkConn, err := makeZKConn(zkClient)
-	if err != nil {
-		cfg.t.Fatal(err)
-	}
+
+	zkConn := makeTestZKConn(cfg)
 	defer zkConn.Close()
-	if err = zkConn.Delete(cfg.nodes[header1].chainPath+"/"+cfg.nodes[header1].name, 0); err != nil {
+	if err := zkConn.Delete(cfg.nodes[header1].chainPath+"/"+cfg.nodes[header1].name, 0); err != nil {
 		cfg.t.Fatal(err)
 	}
 
@@ -305,7 +317,7 @@ func TestAgreementHeaderParitition(t *testing.T) {
 		cmd++
 	}
 	if nCommitted, _ := cfg.nCommitted(0, header1, header2, node21); nCommitted != 0 {
-		cfg.t.Fatalf("新头节%s点应当丢弃原来的头节点%s发送的日志,但有%d个节点提交了第一个日志\n", cfg.addresses[header2], cfg.addresses[header1], nCommitted)
+		cfg.t.Fatalf("新头节%s点应当丢弃原来的头节点%s发送的日志,但有%d个节点提交了第一个日志\n", cfg.ips[header2], cfg.ips[header1], nCommitted)
 	}
 
 	for i := 0; i < iters; i++ {
@@ -330,16 +342,13 @@ func TestAgreementTailParitition(t *testing.T) {
 	_ = cfg.checkChain(0)
 
 	cfg.enableZookeeper(0, false)
-	zkClient, err := makeZKClient(cfg.net, "config")
-	if err != nil {
+
+	zkConn := makeTestZKConn(cfg)
+	defer zkConn.Close()
+	if err := zkConn.Delete(cfg.nodes[0].chainPath+"/"+cfg.nodes[0].name, 0); err != nil {
 		cfg.t.Fatal(err)
 	}
-	if conn, err := makeZKConn(zkClient); err != nil {
-		cfg.t.Fatal(err)
-	} else if err = conn.Delete(cfg.nodes[0].chainPath+"/"+cfg.nodes[0].name, 0); err != nil {
-		cfg.t.Fatal(err)
-		conn.Close()
-	}
+
 	cfg.startOne(1)
 	cfg.startOne(2)
 
@@ -355,13 +364,13 @@ func TestAgreementTailParitition(t *testing.T) {
 		cmd++
 	}
 	if nCommitted, _ := cfg.nCommitted(cmd-1, 1, 2); nCommitted != 0 {
-		cfg.t.Fatalf("原来的尾节点%s占用了锁,新尾节点不应提交日志,但有%d个节点提交了第一个日志\n", cfg.addresses[0], nCommitted)
+		cfg.t.Fatalf("原来的尾节点%s占用了锁,新尾节点不应提交日志,但有%d个节点提交了第一个日志\n", cfg.ips[0], nCommitted)
 	}
 
 	time.Sleep(sessionTimeout)
 
 	if nCommitted, _ := cfg.nCommitted(cmd-1, 1, 2); nCommitted != 2 {
-		cfg.t.Fatalf("原来的尾节点%s释放了锁,新链表节点应当提交所有日志,但只有%d个节点提交所有日志\n", cfg.addresses[0], nCommitted)
+		cfg.t.Fatalf("原来的尾节点%s释放了锁,新链表节点应当提交所有日志,但只有%d个节点提交所有日志\n", cfg.ips[0], nCommitted)
 	}
 
 	cfg.end()

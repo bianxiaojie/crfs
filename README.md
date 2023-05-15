@@ -2,8 +2,11 @@
 基于craq和hdfs改写的分布式文件系统
 
 ## Task 1 实现craq服务
+
 ### Task 1-1 实现链表配置的动态更新
+
 #### 要求
+
 1.  当节点与zookeeper集群之间没有连接时，不断尝试与zookeeper集群建立连接。
 2.  建立连接成功后，节点向zookeeper集群创建一个临时文件，存储节点的地址。
 3.  其他在该路径下创建临时文件的节点与当前节点共同构成一个链表，节点在链表中的顺序由文件名的大小决定。
@@ -11,14 +14,18 @@
 5.  从zookeeper集群读取前驱、后继和尾节点的地址。
 6.  存储第3步和第4步获取的链表信息。
 7.  监听第3步读取的文件夹的变化。
+
 #### 提示
+
 - 需要实现的代码：crfs/node/node.go中的watchChain的2,3,4,5,6。
 - 需要阅读的代码：crfs/node/node.go, crfs/zk/zk.go。
 - 第2步在创建文件时需要同时指定zk.FlagEphemeral和zk.FlagSequence标志，节点路径为chainPath + "/" + prefix
 - 第3步和第4步要向zookeeper集群发送多个请求，因此必须所有的请求都执行成功，才能更新本地的链表信息。
 - 第5步在更新链表信息时需要加锁。
 - 第6步可以借助watch机制实现，即在第3步调用zkConn.Children时将watch指定为true，然后在完成第5步后，阻塞读取zkConn.Children返回的watcher。
+
 #### 测试
+
 在crfs/node路径下执行go test -run TestChain命令，以下输出表示通过测试：
 
 ```shell
@@ -35,6 +42,7 @@ ok      crfs/node       22.655s
 每个测试下的4个数字分别表示运行时长，rpc总数，rpc传输的字节总数和提交的日志数。
 
 ### Task 1-2 实现一致性协议
+
 #### 要求
 (1)实现日志的复制
 流程概述：对于每一个节点，记录后继节点的名称和最新完成复制的日志索引，当后继节点的日志记录落后当前节点的日志记录时，将所有新日志发送给后继节点。
@@ -75,6 +83,7 @@ ok      crfs/node       29.435s
 ```
 
 ### Task 1-3 实现持久化
+
 #### 要求
 1.每当节点提交日志时，将最新提交的日志索引和所有提交的日志持久化。
 2.节点启动时，读取持久化的日志索引和所有提交的日志。
@@ -221,3 +230,9 @@ Test: unreliable net, restarts, many clients ...
 PASS
 ok      crfs/test       111.307s
 ```
+
+### 使用说明
+
+1. 进入crfs目录，执行`docker compose up`。
+2. 容器启动完成后，执行`docker exec -it crfs-client-1 /bin/sh`。
+3. 执行`./client -master=master:9999 -zookeeper=zoo1 -zookeeper=zoo2 -zookeeper=zoo3`进入交互界面，执行help查看命令，执行exit退出交互界面。

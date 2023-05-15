@@ -1,0 +1,121 @@
+version: '3.1'
+
+services:
+  zoo1:
+    image: bxjie/zookeeper
+    restart: always
+    hostname: zoo1
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: server.1=zoo1:2888:3888;2181 server.2=zoo2:2888:3888;2181 server.3=zoo3:2888:3888;2181
+    volumes:
+      - zkdata1:/data
+      - zkdatalog1:/datalog
+      - zklogs1:/logs
+
+  zoo2:
+    image: bxjie/zookeeper
+    restart: always
+    hostname: zoo2
+    environment:
+      ZOO_MY_ID: 2
+      ZOO_SERVERS: server.1=zoo1:2888:3888;2181 server.2=zoo2:2888:3888;2181 server.3=zoo3:2888:3888;2181
+    volumes:
+      - zkdata2:/data
+      - zkdatalog2:/datalog
+      - zklogs2:/logs
+
+  zoo3:
+    image: bxjie/zookeeper
+    restart: always
+    hostname: zoo3
+    environment:
+      ZOO_MY_ID: 3
+      ZOO_SERVERS: server.1=zoo1:2888:3888;2181 server.2=zoo2:2888:3888;2181 server.3=zoo3:2888:3888;2181
+    volumes:
+      - zkdata3:/data
+      - zkdatalog3:/datalog
+      - zklogs3:/logs
+
+  master:
+    build: 
+      context: .
+      dockerfile: ./cmd/master/Dockerfile
+    restart: no
+    hostname: master
+    command: ./master
+    volumes:
+      - masterdata:/data
+
+  chunkserver1:
+    build: 
+      context: .
+      dockerfile: ./cmd/chunkserver/Dockerfile
+    restart: no
+    hostname: chunkserver1
+    depends_on:
+      - master
+      - zoo1
+      - zoo2
+      - zoo3
+    command: ./chunkserver -master=master:9999 -zookeeper=zoo1 -zookeeper=zoo2 -zookeeper=zoo3
+    volumes:
+      - chunkserverdata1:/data
+  
+  chunkserver2:
+    build: 
+      context: .
+      dockerfile: ./cmd/chunkserver/Dockerfile
+    restart: no
+    hostname: chunkserver2
+    depends_on:
+      - master
+      - zoo1
+      - zoo2
+      - zoo3
+    command: ./chunkserver -master=master:9999 -zookeeper=zoo1 -zookeeper=zoo2 -zookeeper=zoo3
+    volumes:
+      - chunkserverdata2:/data
+
+  chunkserver3:
+    build: 
+      context: .
+      dockerfile: ./cmd/chunkserver/Dockerfile
+    restart: no
+    hostname: chunkserver3
+    depends_on:
+      - master
+      - zoo1
+      - zoo2
+      - zoo3
+    command: ./chunkserver -master=master:9999 -zookeeper=zoo1 -zookeeper=zoo2 -zookeeper=zoo3
+    volumes:
+      - chunkserverdata3:/data
+
+  client:
+    build: 
+      context: .
+      dockerfile: ./cmd/client/Dockerfile
+    restart: no
+    hostname: client
+    depends_on:
+      - master
+      - zoo1
+      - zoo2
+      - zoo3
+    command: sleep INFINITY
+
+volumes:
+  zkdata1:
+  zkdatalog1:
+  zklogs1:
+  zkdata2:
+  zkdatalog2:
+  zklogs2:
+  zkdata3:
+  zkdatalog3:
+  zklogs3:
+  masterdata:
+  chunkserverdata1:
+  chunkserverdata2:
+  chunkserverdata3:

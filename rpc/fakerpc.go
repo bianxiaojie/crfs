@@ -28,7 +28,6 @@ package rpc
 import (
 	"bytes"
 	"encoding/gob"
-	"errors"
 	"log"
 	"math/rand"
 	"reflect"
@@ -38,7 +37,7 @@ import (
 	"time"
 )
 
-var errorType = reflect.TypeOf(errors.New(""))
+var errorType = reflect.TypeOf((*error)(nil)).Elem()
 
 type reqMsg struct {
 	endname  interface{} // 发送消息的客户端名
@@ -427,7 +426,7 @@ func MakeService(rcvr interface{}) *Service {
 			mtype.NumIn() != 3 || // 方法的参数个数不等于3
 			mtype.In(2).Kind() != reflect.Ptr || // 方法的第3个参数不是指针类型
 			mtype.NumOut() != 1 ||
-			mtype.Out(0).AssignableTo(errorType) { // 返回值的个数不等于1
+			!mtype.Out(0).AssignableTo(errorType) { // 返回值的个数不等于1
 		} else {
 			// 可能的handler
 			svc.methods[mname] = method

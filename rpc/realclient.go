@@ -1,6 +1,8 @@
 package rpc
 
-import "net/rpc"
+import (
+	"net/rpc"
+)
 
 type RealClient struct {
 	c *rpc.Client
@@ -21,8 +23,9 @@ func MakeRealClients() *RealClients {
 }
 
 func (rcs *RealClients) MakeClient(address string) (Client, error) {
-	rc := &RealClient{}
 	c, err := rpc.Dial("tcp", address)
-	rc.c = c
-	return rc, err
+	if err != nil {
+		return nil, err
+	}
+	return &RealClient{c: c}, err
 }

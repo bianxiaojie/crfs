@@ -118,7 +118,6 @@ func (cs *ChunkStore) chunkServers(chunkNames []string) [][]string {
 		chainName := cs.ChunkInfos[chunkName]
 		chunkServers[i] = cs.ChainInfos[chainName].Servers
 	}
-
 	return chunkServers
 }
 
@@ -186,7 +185,6 @@ func (cs *ChunkStore) rubbishChunks(chunkNames []string) []string {
 			rubbishChunks = append(rubbishChunks, chunkName)
 		}
 	}
-
 	return rubbishChunks
 }
 
@@ -249,7 +247,7 @@ func (mn *MNode) create(parents []string, paths []string, isFile bool) FileOpera
 	}
 
 	mn.Children[name] = makeMNode(name, isFile, mn.CS)
-	if child, ok := mn.Children["_"+name]; ok {
+	if child, ok := mn.Children["/"+name]; ok {
 		mn.deleteNode(child)
 	}
 	mn.LastUpdated = time.Now()
@@ -297,16 +295,16 @@ func (mn *MNode) delete(parents []string, paths []string, isFile bool) FileOpera
 		}
 
 		for name := range child.Children {
-			if name[0] != '_' {
+			if name[0] != '/' {
 				return DirectoryNotEmpty
 			}
 		}
 	}
 
 	delete(mn.Children, name)
-	child.Name = "_" + name
+	child.Name = "/" + name
 	child.LastDeleted = time.Now()
-	mn.Children["_"+name] = child
+	mn.Children["/"+name] = child
 	mn.LastUpdated = time.Now()
 
 	return Success
@@ -332,7 +330,7 @@ func (mn *MNode) restore(parents []string, paths []string, isFile bool) FileOper
 	defer mn.mu.Unlock()
 
 	name := paths[0]
-	child, ok := mn.Children["_"+name]
+	child, ok := mn.Children["/"+name]
 
 	if isFile {
 		if !ok {
@@ -344,7 +342,7 @@ func (mn *MNode) restore(parents []string, paths []string, isFile bool) FileOper
 		}
 	}
 
-	delete(mn.Children, "_"+name)
+	delete(mn.Children, "/"+name)
 	child.Name = name
 	mn.Children[name] = child
 	mn.LastUpdated = time.Now()
@@ -435,7 +433,7 @@ func runmove(src *MNode, srcParents []string, srcPaths []string, target *MNode, 
 	delete(src.Children, srcPaths[0])
 	srcChild.Name = targetPaths[0]
 	target.Children[targetPaths[0]] = srcChild
-	if child, ok := target.Children["_"+targetPaths[0]]; ok {
+	if child, ok := target.Children["/"+targetPaths[0]]; ok {
 		target.deleteNode(child)
 	}
 	src.LastUpdated = time.Now()
@@ -470,7 +468,7 @@ func (mn *MNode) list(parents []string, paths []string) ([]FileInfo, FileOperati
 
 	fileInfos := make([]FileInfo, 0)
 	for _, child := range mn.Children {
-		if child.Name[0] != '_' {
+		if child.Name[0] != '/' {
 			fileInfo := FileInfo{
 				Name:        child.Name,
 				IsFile:      child.IsFile,
@@ -663,7 +661,7 @@ func (mn *MNode) deleteExpiredNodes(expiredDuration time.Duration) {
 	defer mn.mu.RUnlock()
 
 	for _, child := range mn.Children {
-		if child.Name[0] == '_' && time.Since(child.LastDeleted) >= expiredDuration {
+		if child.Name[0] == '/' && time.Since(child.LastDeleted) >= expiredDuration {
 			mn.mu.RUnlock()
 
 			mn.mu.Lock()
@@ -688,17 +686,17 @@ type Master struct {
 	dead        int32
 }
 
-func MakeMaster(directory string, cleanupInterval time.Duration, expiredDuration time.Duration, doen chan bool) *Master {
+func MakeMaster(directory string, cleanupInterval time.Duration, expiredDuration time.Duration, done chan bool) *Master {
 	m := &Master{}
 	cs := makeChunkStore()
 	m.cs = cs
 	m.root = makeMNode("", false, cs)
 	m.directory = directory
+	m.done = done
 
 	if directory != "" {
 		os.MkdirAll(directory+"/master", 0775)
 	}
-
 	m.readPersist()
 
 	go m.cleanup(cleanupInterval, expiredDuration)
@@ -782,11 +780,6 @@ func validatePath(path string) FileOperationErr {
 	}
 
 	if path[len(path)-1] == '/' {
-		return InvalidPath
-	}
-
-	offset := strings.LastIndexByte(path, '/') + 1
-	if path[offset] == '_' {
 		return InvalidPath
 	}
 

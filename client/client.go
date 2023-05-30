@@ -137,17 +137,6 @@ func (c *Client) Write(path string, offset int, data []byte) master.FileOperatio
 
 	// 3.按照chunk索引顺序将数据写入相应的chunk servers中
 	for i, chunkName := range writeReply.ChunkNames {
-		// 连接chunk servers
-		chunkServers := writeReply.ChunkServers[i]
-		chunkServerClients := make([]rpc.Client, len(chunkServers))
-		for j, chunkServer := range chunkServers {
-			chunkServerClient, err := c.rpcClients.MakeClient(chunkServer + ":7999")
-			if err != nil {
-				return master.ErrConnection
-			}
-			chunkServerClients[j] = chunkServerClient
-		}
-
 		c.requestid++
 
 		// 计算write chunk的起始地址和数据
@@ -168,23 +157,34 @@ func (c *Client) Write(path string, offset int, data []byte) master.FileOperatio
 
 		chunkData := data[dataStart:dataEnd]
 
+		chunkServerClients := make([]rpc.Client, len(writeReply.ChunkServers[i]))
+
 		j := 0
 		for {
-			args := chunkserver.WriteArgs{
-				ChunkName: chunkName,
-				Offset:    chunkOffset,
-				Data:      chunkData,
-				ClerkId:   c.id,
-				RequestId: c.requestid,
-			}
-			var reply chunkserver.WriteReply
-
-			if chunkServerClients[j].Call("ChunkServer.Write", &args, &reply) && reply.Err == persister.Success {
-				break
+			// 连接chunk servers
+			if chunkServerClients[j] == nil {
+				if chunkServerClient, err := c.rpcClients.MakeClient(writeReply.ChunkServers[i][j] + ":7999"); err == nil {
+					chunkServerClients[j] = chunkServerClient
+				}
 			}
 
-			if reply.Err == persister.OutOfChunk {
-				log.Fatal(reply.Err)
+			if chunkServerClients[j] != nil {
+				args := chunkserver.WriteArgs{
+					ChunkName: chunkName,
+					Offset:    chunkOffset,
+					Data:      chunkData,
+					ClerkId:   c.id,
+					RequestId: c.requestid,
+				}
+				var reply chunkserver.WriteReply
+
+				if chunkServerClients[j].Call("ChunkServer.Write", &args, &reply) && reply.Err == persister.Success {
+					break
+				}
+
+				if reply.Err == persister.OutOfChunk {
+					log.Fatal(reply.Err)
+				}
 			}
 
 			j = (j + 1) % len(chunkServerClients)
@@ -194,7 +194,9 @@ func (c *Client) Write(path string, offset int, data []byte) master.FileOperatio
 		}
 
 		for _, chunkServerClient := range chunkServerClients {
-			chunkServerClient.Close()
+			if chunkServerClient != nil {
+				chunkServerClient.Close()
+			}
 		}
 	}
 
@@ -251,37 +253,39 @@ func (c *Client) Append(path string, data []byte) (int, master.FileOperationErr)
 			return -1, appendReply.Err
 		}
 
-		chunkServerClients := make([]rpc.Client, len(appendReply.ChunkServers))
-		for j, chunkServer := range appendReply.ChunkServers {
-			chunkServerClient, err := c.rpcClients.MakeClient(chunkServer + ":7999")
-			if err != nil {
-				return -1, master.ErrConnection
-			}
-			chunkServerClients[j] = chunkServerClient
-		}
-
 		c.requestid++
+
+		chunkServerClients := make([]rpc.Client, len(appendReply.ChunkServers))
 
 		// 2.将数据追加到chunk servers中
 		j := 0
 		for {
-			args := chunkserver.AppendArgs{
-				ChunkName: appendReply.ChunkName,
-				Data:      data,
-				ClerkId:   c.id,
-				RequestId: c.requestid,
+			// 连接chunk servers
+			if chunkServerClients[j] == nil {
+				if chunkServerClient, err := c.rpcClients.MakeClient(appendReply.ChunkServers[j] + ":7999"); err == nil {
+					chunkServerClients[j] = chunkServerClient
+				}
 			}
-			var reply chunkserver.AppendReply
 
-			// 3.如果chunk servers返回persister.OutOfChunk错误,更新fullChunkIndex = appendReply.ChunkIndex,并返回步骤1
-			if chunkServerClients[j].Call("ChunkServer.Append", &args, &reply) {
-				if reply.Err == persister.Success {
-					offset = reply.Offset
-					ok = true
-					break
-				} else if reply.Err == persister.OutOfChunk {
-					fullChunkIndex = appendReply.ChunkIndex
-					break
+			if chunkServerClients[j] != nil {
+				args := chunkserver.AppendArgs{
+					ChunkName: appendReply.ChunkName,
+					Data:      data,
+					ClerkId:   c.id,
+					RequestId: c.requestid,
+				}
+				var reply chunkserver.AppendReply
+
+				// 3.如果chunk servers返回persister.OutOfChunk错误,更新fullChunkIndex = appendReply.ChunkIndex,并返回步骤1
+				if chunkServerClients[j].Call("ChunkServer.Append", &args, &reply) {
+					if reply.Err == persister.Success {
+						offset = reply.Offset
+						ok = true
+						break
+					} else if reply.Err == persister.OutOfChunk {
+						fullChunkIndex = appendReply.ChunkIndex
+						break
+					}
 				}
 			}
 
@@ -292,7 +296,9 @@ func (c *Client) Append(path string, data []byte) (int, master.FileOperationErr)
 		}
 
 		for _, chunkServerClient := range chunkServerClients {
-			chunkServerClient.Close()
+			if chunkServerClient != nil {
+				chunkServerClient.Close()
+			}
 		}
 	}
 
@@ -357,17 +363,6 @@ func (c *Client) Read(path string, offset int, size int) ([]byte, master.FileOpe
 	// 3.按照chunk索引顺序依次读取数据
 	result := make([]byte, size)
 	for i, chunkName := range readReply.ChunkNames {
-		// 连接chunk servers
-		chunkServers := readReply.ChunkServers[i]
-		chunkServerClients := make([]rpc.Client, len(chunkServers))
-		for j, chunkServer := range chunkServers {
-			chunkServerClient, err := c.rpcClients.MakeClient(chunkServer + ":7999")
-			if err != nil {
-				return nil, master.ErrConnection
-			}
-			chunkServerClients[j] = chunkServerClient
-		}
-
 		c.requestid++
 
 		// 计算read chunk的起始地址和数据
@@ -388,29 +383,42 @@ func (c *Client) Read(path string, offset int, size int) ([]byte, master.FileOpe
 
 		chunkSize := dataEnd - dataStart
 
+		chunkServerClients := make([]rpc.Client, len(readReply.ChunkServers[i]))
+
 		j := 0
 		for {
-			args := chunkserver.ReadArgs{
-				ChunkName: chunkName,
-				Offset:    chunkOffset,
-				Size:      chunkSize,
-				ClerkId:   c.id,
-				RequestId: c.requestid,
-			}
-			var reply chunkserver.ReadReply
-
-			if chunkServerClients[j].Call("ChunkServer.Read", &args, &reply) && reply.Err == persister.Success {
-				for dataIndex := dataStart; dataIndex < dataEnd; dataIndex++ {
-					result[dataIndex] = reply.Data[dataIndex-dataStart]
+			// 连接chunk servers
+			if chunkServerClients[j] == nil {
+				if chunkServerClient, err := c.rpcClients.MakeClient(readReply.ChunkServers[i][j] + ":7999"); err == nil {
+					chunkServerClients[j] = chunkServerClient
 				}
-				break
 			}
 
-			if reply.Err == persister.OutOfChunk {
-				for _, chunkServerClient := range chunkServerClients {
-					chunkServerClient.Close()
+			if chunkServerClients[j] != nil {
+				args := chunkserver.ReadArgs{
+					ChunkName: chunkName,
+					Offset:    chunkOffset,
+					Size:      chunkSize,
+					ClerkId:   c.id,
+					RequestId: c.requestid,
 				}
-				return nil, master.OutOfChunk
+				var reply chunkserver.ReadReply
+
+				if chunkServerClients[j].Call("ChunkServer.Read", &args, &reply) && reply.Err == persister.Success {
+					for dataIndex := dataStart; dataIndex < dataEnd; dataIndex++ {
+						result[dataIndex] = reply.Data[dataIndex-dataStart]
+					}
+					break
+				}
+
+				if reply.Err == persister.OutOfChunk {
+					for _, chunkServerClient := range chunkServerClients {
+						if chunkServerClient != nil {
+							chunkServerClient.Close()
+						}
+					}
+					return nil, master.OutOfChunk
+				}
 			}
 
 			j = (j + 1) % len(chunkServerClients)
@@ -420,7 +428,9 @@ func (c *Client) Read(path string, offset int, size int) ([]byte, master.FileOpe
 		}
 
 		for _, chunkServerClient := range chunkServerClients {
-			chunkServerClient.Close()
+			if chunkServerClient != nil {
+				chunkServerClient.Close()
+			}
 		}
 	}
 

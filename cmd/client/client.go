@@ -355,7 +355,7 @@ func read(c *client.Client, cmd string, args []string, usage string) {
 				fmt.Fprintln(os.Stderr, err)
 			}
 		} else {
-			fmt.Print(string(data))
+			fmt.Println(string(data))
 		}
 	}
 }

@@ -251,7 +251,7 @@ func (fp *FilePersister) WriteChunk(chunkName string, offset int, data []byte) E
 	chunkFile := fp.directory + "/" + fp.chainName + "/chunk/" + chunkName
 	file, err := os.OpenFile(chunkFile, os.O_CREATE|os.O_WRONLY, 0664)
 	if err != nil {
-		log.Fatalf("hello %v\n", err)
+		log.Fatal(err)
 	}
 
 	if _, err = file.WriteAt(data, int64(offset)); err != nil {
@@ -278,13 +278,13 @@ func (fp *FilePersister) AppendChunk(chunkName string, data []byte) (int, Err) {
 
 	chunkFile := fp.directory + "/" + fp.chainName + "/chunk/" + chunkName
 	fi, err := os.Stat(chunkFile)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		log.Fatal(err)
 	}
 
-	offset := int(fi.Size())
-	if offset+len(data) > MaxChunkSize {
-		return -1, OutOfChunk
+	var offset int
+	if fi != nil {
+		offset = int(fi.Size())
 	}
 
 	file, err := os.OpenFile(chunkFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0664)
